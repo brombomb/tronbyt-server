@@ -133,16 +133,6 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 		deviceCurrentChunkApp: make(map[string]string),
 	}
 
-	if cfg.ScreenyStudioURL != "" {
-		s.RegisterExternalProvider(screeny.NewAdapter(screeny.AdapterConfig{
-			StudioURL:    cfg.ScreenyStudioURL,
-			FPS:          cfg.ScreenyFPS,
-			MaxWebPBytes: cfg.ScreenyMaxWebPBytes,
-			ScaleFilter:  cfg.ScreenyScaleFilter,
-		}))
-		slog.Info("Registered Screeny external app provider", "url", cfg.ScreenyStudioURL, "scaleFilter", cfg.ScreenyScaleFilter)
-	}
-
 	// Load Settings from DB
 	// Secret Key
 	secretKey, err := s.getSetting("secret_key")
@@ -171,6 +161,23 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 		cfg.SystemAppsAutoRefresh = val == "true"
 	}
 	s.systemAppsAutoRefresh.Store(cfg.SystemAppsAutoRefresh)
+
+	// Screeny Studio Settings from DB or env
+	if val, err := s.getSetting("screeny_studio_url"); err == nil && val != "" {
+		cfg.ScreenyStudioURL = val
+	}
+	if val, err := s.getSetting("screeny_scale_filter"); err == nil && val != "" {
+		cfg.ScreenyScaleFilter = val
+	}
+	if cfg.ScreenyStudioURL != "" {
+		s.RegisterExternalProvider(screeny.NewAdapter(screeny.AdapterConfig{
+			StudioURL:    cfg.ScreenyStudioURL,
+			FPS:          cfg.ScreenyFPS,
+			MaxWebPBytes: cfg.ScreenyMaxWebPBytes,
+			ScaleFilter:  cfg.ScreenyScaleFilter,
+		}))
+		slog.Info("Registered Screeny external app provider", "url", cfg.ScreenyStudioURL, "scaleFilter", cfg.ScreenyScaleFilter)
+	}
 
 	// Load OIDC settings from DB
 	if val, err := s.getSetting("oidc_enabled"); err == nil {
@@ -382,6 +389,7 @@ func (s *Server) routes() {
 	s.Router.HandleFunc("POST /refresh_system_repo", s.RequireLogin(s.handleRefreshSystemRepo))
 	s.Router.HandleFunc("POST /settings/system-apps-auto-refresh", s.RequireLogin(s.handleSetSystemAppsAutoRefresh))
 	s.Router.HandleFunc("POST /update_firmware", s.RequireLogin(s.handleUpdateFirmware))
+	s.Router.HandleFunc("POST /settings/screeny", s.RequireLogin(s.handleSetScreenyConfig))
 
 	// App broken status (development only)
 	s.Router.HandleFunc("POST /mark_app_broken", s.RequireLogin(s.handleMarkAppBroken))
@@ -497,6 +505,38 @@ func (s *Server) ListExternalProviders() []providers.ExternalAppProvider {
 		list = append(list, p)
 	}
 	return list
+}
+
+// updateScreenyConfig updates Screeny settings in the DB and running server.
+func (s *Server) updateScreenyConfig(studioURL, scaleFilter string) error {
+	cleanURL := strings.TrimRight(strings.TrimSpace(studioURL), "/")
+	s.Config.ScreenyStudioURL = cleanURL
+	if scaleFilter != "" {
+		s.Config.ScreenyScaleFilter = scaleFilter
+	}
+	if err := s.setSetting("screeny_studio_url", s.Config.ScreenyStudioURL); err != nil {
+		return err
+	}
+	if err := s.setSetting("screeny_scale_filter", s.Config.ScreenyScaleFilter); err != nil {
+		return err
+	}
+
+	if s.Config.ScreenyStudioURL != "" {
+		adapter := screeny.NewAdapter(screeny.AdapterConfig{
+			StudioURL:    s.Config.ScreenyStudioURL,
+			FPS:          s.Config.ScreenyFPS,
+			MaxWebPBytes: s.Config.ScreenyMaxWebPBytes,
+			ScaleFilter:  s.Config.ScreenyScaleFilter,
+		})
+		s.RegisterExternalProvider(adapter)
+		slog.Info("Updated Screeny external app provider", "url", s.Config.ScreenyStudioURL, "scaleFilter", s.Config.ScreenyScaleFilter)
+	} else {
+		s.externalProvidersMu.Lock()
+		delete(s.externalProviders, "screeny")
+		s.externalProvidersMu.Unlock()
+		slog.Info("Deregistered Screeny external app provider")
+	}
+	return nil
 }
 
 // isExternalAppPath returns true if the path refers to an external provider (e.g. "screeny:clock").

@@ -92,6 +92,13 @@ type TemplateData struct {
 	GlobalSystemRepoURL   string
 	SystemAppsAutoRefresh bool
 
+	// Screeny Provider Settings
+	ScreenyStudioURL   string
+	ScreenyScaleFilter string
+	ScreenyConnected   bool
+	ScreenyPatchCount  int
+	ScreenyStatus      string
+
 	// App Config
 	App         *data.App
 	Schema      template.JS
