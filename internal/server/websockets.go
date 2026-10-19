@@ -279,6 +279,149 @@ func (s *Server) wsWriteLoop(ctx context.Context, conn *websocket.Conn, initialD
 			}
 		}
 
+		if pendingImage == nil && app != nil {
+			chunks := s.getAppChunks(device.ID, app)
+			if len(chunks) > 1 {
+				interrupted := false
+				for chunkIdx, chunk := range chunks {
+					select {
+					case <-stopCh:
+						return
+					case <-ctx.Done():
+						return
+					default:
+					}
+
+					chunkDwell := max(1, chunk.DurationMs/1000)
+					if err := conn.WriteJSON(map[string]any{"dwell_secs": chunkDwell}); err != nil {
+						slog.Error("Failed to write metadata WS message for chunk", "chunk", chunkIdx, "error", err)
+						return
+					}
+
+					effectiveBrightness = device.GetEffectiveBrightness()
+					if effectiveBrightness != lastSentBrightness {
+						if err := conn.WriteJSON(map[string]int{"brightness": effectiveBrightness}); err != nil {
+							slog.Error("Failed to write brightness WS message", "error", err)
+							return
+						}
+						lastSentBrightness = effectiveBrightness
+					}
+
+					if err := conn.WriteMessage(websocket.BinaryMessage, chunk.WebPBytes); err != nil {
+						slog.Error("Failed to write chunk binary message to WS", "chunk", chunkIdx, "error", err)
+						return
+					}
+
+					if chunkIdx == 0 && sendImmediate {
+						if err := conn.WriteJSON(map[string]bool{"immediate": true}); err != nil {
+							slog.Error("Failed to write immediate WS message", "error", err)
+							return
+						}
+						sendImmediate = false
+					}
+
+					chunkDuration := time.Duration(chunk.DurationMs) * time.Millisecond
+					if chunkDuration <= 0 {
+						chunkDuration = time.Duration(chunkDwell) * time.Second
+					}
+					chunkTimer := time.NewTimer(chunkDuration)
+
+					waitingChunk := true
+					for waitingChunk {
+						select {
+						case msg := <-ackCh:
+							if msg.Displaying != nil || msg.Counter != nil {
+								if chunkIdx == 0 && app != nil {
+									slog.Debug("Received ACK for chunk 0, updating DisplayingApp", "app", app.Iname, "device", device.ID)
+									if _, err := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).Update(ctx, "displaying_app", app.Iname); err != nil {
+										slog.Error("Failed to update displaying_app", "device", device.ID, "error", err)
+									}
+									if user != nil {
+										s.notifyDashboard(user.Username, WSEvent{Type: "image_updated", DeviceID: device.ID})
+									}
+								}
+							}
+						case val := <-broadcastCh:
+							reloaded, err := gorm.G[data.Device](s.DB).Preload("Apps", nil).Where("id = ?", initialDevice.ID).First(ctx)
+							if err != nil {
+								slog.Error("Device gone", "id", initialDevice.ID)
+								chunkTimer.Stop()
+								return
+							}
+							device = reloaded
+
+							var isCommand bool
+							var isImage bool
+							var cmdPayload []byte
+							var pImgData []byte
+
+							switch v := val.(type) {
+							case DeviceCommandMessage:
+								isCommand = true
+								cmdPayload = v.Payload
+							case []byte:
+								if len(v) > 0 {
+									isImage = true
+									pImgData = v
+								}
+							}
+
+							if isCommand {
+								if err := conn.WriteMessage(websocket.TextMessage, cmdPayload); err != nil {
+									slog.Error("Failed to write command to WS", "error", err)
+									chunkTimer.Stop()
+									return
+								}
+								continue
+							}
+
+							if isImage {
+								pendingImage = pImgData
+								interrupted = true
+								waitingChunk = false
+								sendImmediate = true
+								chunkTimer.Stop()
+							} else {
+								newBrightness := device.GetEffectiveBrightness()
+								if newBrightness != lastSentBrightness {
+									if err := conn.WriteJSON(map[string]int{"brightness": newBrightness}); err != nil {
+										slog.Error("Failed to write brightness WS message", "error", err)
+										chunkTimer.Stop()
+										return
+									}
+									lastSentBrightness = newBrightness
+								}
+							}
+						case <-chunkTimer.C:
+							waitingChunk = false
+						case <-stopCh:
+							chunkTimer.Stop()
+							return
+						case <-ctx.Done():
+							chunkTimer.Stop()
+							return
+						}
+					}
+
+					if !chunkTimer.Stop() {
+						select {
+						case <-chunkTimer.C:
+						default:
+						}
+					}
+
+					if interrupted {
+						break
+					}
+				}
+
+				if interrupted {
+					continue
+				}
+				continue
+			}
+		}
+
 		dwell := device.GetEffectiveDwellTime(app)
 
 		if err := conn.WriteJSON(map[string]any{"dwell_secs": dwell}); err != nil {

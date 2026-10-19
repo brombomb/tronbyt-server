@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"tronbyt-server/internal/data"
+	"tronbyt-server/internal/providers"
 	"tronbyt-server/internal/renderer"
 	"tronbyt-server/web"
 
@@ -108,12 +109,107 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 		return false
 	}
 
+	appBasename := fmt.Sprintf("%s-%s", app.Name, app.Iname)
+
+	// External Provider App (e.g. Screeny)
+	if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
+		now := time.Now()
+		forceRender := s.filtersChangedSinceLastRender(device, app)
+		if forceRender || time.Since(app.LastRender) > time.Duration(app.UInterval)*time.Minute {
+			slog.Info("Rendering external app", "provider", provider.Name(), "app", appBasename)
+			startTime := time.Now()
+
+			width, height := data.DefaultCanvasWidth, data.DefaultCanvasHeight
+			if device != nil {
+				width, height = device.Type.CanvasSize()
+				if device.Type.Supports2x() {
+					width *= 2
+					height *= 2
+				}
+			}
+
+			dwellSecs := 15
+			if device != nil {
+				dwellSecs = device.GetEffectiveDwellTime(app)
+			}
+			maxChunkSize := s.GetMaxChunkSizeForDevice(device)
+
+			req := providers.RenderRequest{
+				AppID:        appID,
+				Width:        width,
+				Height:       height,
+				FPS:          s.Config.ScreenyFPS,
+				DurationMs:   dwellSecs * 1000,
+				MaxChunkSize: maxChunkSize,
+				Timezone:     device.GetTimezone(),
+				Config:       app.Config,
+			}
+
+			chunks, err := provider.RenderAppChunks(ctx, req)
+			renderDur := time.Since(startTime)
+			s.metrics.renderDuration.Observe(renderDur.Seconds())
+
+			if err != nil || len(chunks) == 0 {
+				s.metrics.renderTotal.WithLabelValues("error").Inc()
+				slog.Error("Error rendering external app", "provider", provider.Name(), "app", appBasename, "error", err)
+
+				// Graceful fallback: check if we have previously cached chunks
+				if existing := s.getAppChunks(device.ID, app); len(existing) > 0 {
+					slog.Warn("Reusing previously cached chunk(s) for unreachable external app", "app", appBasename)
+					return true
+				}
+
+				// Record failed render in DB
+				appUpdates := data.App{
+					LastRender:      now,
+					LastRenderDur:   renderDur,
+					EmptyLastRender: true,
+				}
+				_, _ = gorm.G[data.App](s.DB).Where("id = ?", app.ID).
+					Select("LastRender", "LastRenderDur", "EmptyLastRender").
+					Updates(ctx, appUpdates)
+				return false
+			}
+
+			s.metrics.renderTotal.WithLabelValues("success").Inc()
+
+			// Save chunks to disk and cache
+			if err := s.saveAppChunks(device.ID, app, chunks); err != nil {
+				slog.Error("Failed to save external app chunks", "app", appBasename, "error", err)
+			}
+
+			// Atomic DB update
+			appUpdates := data.App{
+				LastRender:           now,
+				LastSuccessfulRender: &now,
+				LastRenderDur:        renderDur,
+				EmptyLastRender:      false,
+			}
+			rowsAffected, err := gorm.G[data.App](s.DB).Where("id = ?", app.ID).
+				Select("LastRender", "LastSuccessfulRender", "LastRenderDur", "EmptyLastRender").
+				Updates(ctx, appUpdates)
+			if err != nil || rowsAffected == 0 {
+				return false
+			}
+
+			app.LastRender = now
+			app.LastSuccessfulRender = &now
+			app.LastRenderDur = renderDur
+			app.EmptyLastRender = false
+
+			if app.AutoPin {
+				s.handleAutoPin(ctx, app, device, user, true)
+			}
+			return true
+		}
+		return true // Not time to render yet
+	}
+
 	appPath, err := securejoin.SecureJoin(s.DataDir, *app.Path)
 	if err != nil {
 		slog.Error("Failed to resolve app path", "path", *app.Path, "error", err)
 		return false
 	}
-	appBasename := fmt.Sprintf("%s-%s", app.Name, app.Iname)
 	webpDir, err := s.ensureDeviceImageDir(device.ID)
 	if err != nil {
 		slog.Error("Failed to get device webp directory for rendering", "device_id", device.ID, "error", err)

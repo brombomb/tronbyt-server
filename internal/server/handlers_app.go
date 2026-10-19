@@ -28,6 +28,8 @@ import (
 	"tronbyt-server/internal/renderer"
 
 	securejoin "github.com/cyphar/filepath-securejoin"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -70,6 +72,35 @@ func (s *Server) handleAddAppGet(w http.ResponseWriter, r *http.Request) {
 	}
 	s.systemAppsCacheMutex.RUnlock()
 	customApps := apps.ListUserApps(s.DataDir, user.Username)
+
+	// External Provider Apps (e.g. Screeny)
+	for _, provider := range s.ListExternalProviders() {
+		extApps, err := provider.ListApps(r.Context())
+		if err != nil {
+			slog.Warn("Failed to list external apps", "provider", provider.Name(), "error", err)
+			continue
+		}
+		titleCaser := cases.Title(language.English)
+		for _, ext := range extApps {
+			manifest := apps.Manifest{
+				ID:          fmt.Sprintf("%s:%s", provider.Name(), ext.ID),
+				Name:        fmt.Sprintf("[%s] %s", titleCaser.String(provider.Name()), ext.Name),
+				Summary:     ext.Summary,
+				Desc:        ext.Desc,
+				Author:      ext.Author,
+				FileName:    ext.ID,
+				PackageName: ext.ID,
+				Supports2x:  ext.Supports2x,
+				Category:    titleCaser.String(provider.Name()),
+				Tags:        ext.Tags,
+			}
+			appMeta := apps.AppMetadata{
+				Manifest: manifest,
+				Path:     fmt.Sprintf("%s:%s", provider.Name(), ext.ID),
+			}
+			systemApps = append(systemApps, appMeta)
+		}
+	}
 
 	s.markInstalledApps(device, systemApps, customApps)
 
@@ -163,11 +194,15 @@ func (s *Server) handleAddAppPost(w http.ResponseWriter, r *http.Request) {
 	displayTime, _ := strconv.Atoi(displayTimeStr)
 
 	// Construct source path
-	realPath, err := securejoin.SecureJoin(s.DataDir, appPath)
-	if err != nil {
-		slog.Warn("Potential path traversal", "path", appPath, "error", err)
-		http.Error(w, "Invalid path", http.StatusBadRequest)
-		return
+	var realPath string
+	if !s.isExternalAppPath(appPath) {
+		var err error
+		realPath, err = securejoin.SecureJoin(s.DataDir, appPath)
+		if err != nil {
+			slog.Warn("Potential path traversal", "path", appPath, "error", err)
+			http.Error(w, "Invalid path", http.StatusBadRequest)
+			return
+		}
 	}
 
 	iname, err := generateUniqueIname(s.DB, device.ID)
@@ -217,7 +252,7 @@ func (s *Server) handleAddAppPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// If WebP, copy file and redirect to index
-	isWebP := strings.EqualFold(filepath.Ext(appPath), ".webp")
+	isWebP := !s.isExternalAppPath(appPath) && strings.EqualFold(filepath.Ext(appPath), ".webp")
 	if isWebP {
 		destDir, err := s.ensureDeviceImageDir(device.ID)
 		if err != nil {
@@ -358,18 +393,26 @@ func (s *Server) handleConfigAppGet(w http.ResponseWriter, r *http.Request) {
 	// Get Schema
 	var schemaBytes []byte
 	if app.Path != nil && *app.Path != "" {
-		appPath, err := securejoin.SecureJoin(s.DataDir, *app.Path)
-		if err != nil {
-			slog.Error("Failed to resolve app path", "path", *app.Path, "error", err)
-			http.Error(w, "Invalid app path", http.StatusBadRequest)
-			return
+		if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
+			var err error
+			schemaBytes, err = provider.GetAppSchema(r.Context(), appID)
+			if err != nil {
+				slog.Error("Failed to get external app schema", "provider", provider.Name(), "appID", appID, "error", err)
+			}
 		} else {
-			if !strings.HasSuffix(strings.ToLower(appPath), ".webp") {
-				schemaWidth, schemaHeight := device.Type.CanvasSize()
-				schemaBytes, err = renderer.GetSchema(r.Context(), appPath, schemaWidth, schemaHeight, device.Type.Supports2x())
-				if err != nil {
-					slog.Error("Failed to get app schema", "error", err)
-					// Fall through with empty schema
+			appPath, err := securejoin.SecureJoin(s.DataDir, *app.Path)
+			if err != nil {
+				slog.Error("Failed to resolve app path", "path", *app.Path, "error", err)
+				http.Error(w, "Invalid app path", http.StatusBadRequest)
+				return
+			} else {
+				if !strings.HasSuffix(strings.ToLower(appPath), ".webp") {
+					schemaWidth, schemaHeight := device.Type.CanvasSize()
+					schemaBytes, err = renderer.GetSchema(r.Context(), appPath, schemaWidth, schemaHeight, device.Type.Supports2x())
+					if err != nil {
+						slog.Error("Failed to get app schema", "error", err)
+						// Fall through with empty schema
+					}
 				}
 			}
 		}
@@ -411,42 +454,54 @@ func (s *Server) handleAppSchemaGet(w http.ResponseWriter, r *http.Request) {
 
 	schemaBytes := []byte("{}")
 	if app.Path != nil && *app.Path != "" {
-		appPath, err := securejoin.SecureJoin(s.DataDir, *app.Path)
-		if err != nil {
-			slog.Error("Failed to resolve app path", "path", *app.Path, "error", err)
-			http.Error(w, "Invalid app path", http.StatusBadRequest)
-			return
-		}
-
-		if !strings.HasSuffix(strings.ToLower(appPath), ".webp") {
-			schemaWidth, schemaHeight := device.Type.CanvasSize()
-			getSchema := func() error {
-				b, err := renderer.GetSchema(r.Context(), appPath, schemaWidth, schemaHeight, device.Type.Supports2x())
-				if err != nil {
-					return err
-				}
-				if len(b) > 0 {
-					schemaBytes = b
-				}
-				return nil
-			}
-
-			// On refresh, bypass the cached http.get responses for this app so
-			// get_schema refetches dropdown data from origin. The cache key
-			// prefix mirrors pixlet's: "httpcache:<app id>:" where the app id is
-			// the base name of the applet path (see runtime/httpcache.go).
-			if r.URL.Query().Get("refresh") == "true" && s.SchemaCache != nil {
-				prefix := fmt.Sprintf("httpcache:%s:", filepath.Base(appPath))
-				err = s.SchemaCache.WithBypass(prefix, getSchema)
-			} else {
-				err = getSchema()
-			}
+		if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
+			b, err := provider.GetAppSchema(r.Context(), appID)
 			if err != nil {
-				// Return an error so the client keeps the currently-rendered
-				// options instead of replacing them with an empty form.
-				slog.Error("Failed to get app schema", "error", err)
+				slog.Error("Failed to get external app schema", "provider", provider.Name(), "appID", appID, "error", err)
 				http.Error(w, "Failed to load schema", http.StatusBadGateway)
 				return
+			}
+			if len(b) > 0 {
+				schemaBytes = b
+			}
+		} else {
+			appPath, err := securejoin.SecureJoin(s.DataDir, *app.Path)
+			if err != nil {
+				slog.Error("Failed to resolve app path", "path", *app.Path, "error", err)
+				http.Error(w, "Invalid app path", http.StatusBadRequest)
+				return
+			}
+
+			if !strings.HasSuffix(strings.ToLower(appPath), ".webp") {
+				schemaWidth, schemaHeight := device.Type.CanvasSize()
+				getSchema := func() error {
+					b, err := renderer.GetSchema(r.Context(), appPath, schemaWidth, schemaHeight, device.Type.Supports2x())
+					if err != nil {
+						return err
+					}
+					if len(b) > 0 {
+						schemaBytes = b
+					}
+					return nil
+				}
+
+				// On refresh, bypass the cached http.get responses for this app so
+				// get_schema refetches dropdown data from origin. The cache key
+				// prefix mirrors pixlet's: "httpcache:<app id>:" where the app id is
+				// the base name of the applet path (see runtime/httpcache.go).
+				if r.URL.Query().Get("refresh") == "true" && s.SchemaCache != nil {
+					prefix := fmt.Sprintf("httpcache:%s:", filepath.Base(appPath))
+					err = s.SchemaCache.WithBypass(prefix, getSchema)
+				} else {
+					err = getSchema()
+				}
+				if err != nil {
+					// Return an error so the client keeps the currently-rendered
+					// options instead of replacing them with an empty form.
+					slog.Error("Failed to get app schema", "error", err)
+					http.Error(w, "Failed to load schema", http.StatusBadGateway)
+					return
+				}
 			}
 		}
 	}

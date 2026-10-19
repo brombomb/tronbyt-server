@@ -22,6 +22,9 @@ import (
 
 	"tronbyt-server/internal/apps"
 	"tronbyt-server/internal/config"
+	"tronbyt-server/internal/data"
+	"tronbyt-server/internal/providers"
+	"tronbyt-server/internal/providers/screeny"
 	syncer "tronbyt-server/internal/sync"
 	"tronbyt-server/web"
 
@@ -60,6 +63,14 @@ type Server struct {
 	systemAppsRefreshMutex               sync.Mutex
 	systemAppsAutoRefreshPreferenceMutex sync.Mutex
 	systemAppsAutoRefresh                atomic.Bool
+
+	externalProviders     map[string]providers.ExternalAppProvider
+	externalProvidersMu   sync.RWMutex
+	appChunksCache        map[string][]providers.RenderChunk
+	appChunksMu           sync.RWMutex
+	deviceChunkIndices    map[string]int
+	deviceCurrentChunkApp map[string]string
+	deviceChunkMu         sync.Mutex
 
 	// SchemaCache, when set, allows forcing a one-shot refetch of an app's
 	// cached HTTP responses so dynamic schema data (e.g. dropdown options
@@ -114,8 +125,22 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 				return true
 			},
 		},
-		PromRegistry: prometheus.DefaultRegisterer,
-		PromGatherer: prometheus.DefaultGatherer,
+		PromRegistry:          prometheus.DefaultRegisterer,
+		PromGatherer:          prometheus.DefaultGatherer,
+		externalProviders:     make(map[string]providers.ExternalAppProvider),
+		appChunksCache:        make(map[string][]providers.RenderChunk),
+		deviceChunkIndices:    make(map[string]int),
+		deviceCurrentChunkApp: make(map[string]string),
+	}
+
+	if cfg.ScreenyStudioURL != "" {
+		s.RegisterExternalProvider(screeny.NewAdapter(screeny.AdapterConfig{
+			StudioURL:    cfg.ScreenyStudioURL,
+			FPS:          cfg.ScreenyFPS,
+			MaxWebPBytes: cfg.ScreenyMaxWebPBytes,
+			ScaleFilter:  cfg.ScreenyScaleFilter,
+		}))
+		slog.Info("Registered Screeny external app provider", "url", cfg.ScreenyStudioURL, "scaleFilter", cfg.ScreenyScaleFilter)
 	}
 
 	// Load Settings from DB
@@ -447,4 +472,191 @@ func (s *Server) handleDots(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write([]byte(svg)); err != nil {
 		slog.Error("Failed to write dots SVG", "error", err)
 	}
+}
+
+// RegisterExternalProvider registers an external app store/renderer provider.
+func (s *Server) RegisterExternalProvider(p providers.ExternalAppProvider) {
+	s.externalProvidersMu.Lock()
+	defer s.externalProvidersMu.Unlock()
+	s.externalProviders[p.Name()] = p
+}
+
+// GetExternalProvider retrieves an external app provider by name.
+func (s *Server) GetExternalProvider(name string) providers.ExternalAppProvider {
+	s.externalProvidersMu.RLock()
+	defer s.externalProvidersMu.RUnlock()
+	return s.externalProviders[name]
+}
+
+// ListExternalProviders returns all registered external app providers.
+func (s *Server) ListExternalProviders() []providers.ExternalAppProvider {
+	s.externalProvidersMu.RLock()
+	defer s.externalProvidersMu.RUnlock()
+	list := make([]providers.ExternalAppProvider, 0, len(s.externalProviders))
+	for _, p := range s.externalProviders {
+		list = append(list, p)
+	}
+	return list
+}
+
+// isExternalAppPath returns true if the path refers to an external provider (e.g. "screeny:clock").
+func (s *Server) isExternalAppPath(path string) bool {
+	_, _, ok := s.parseExternalAppPath(path)
+	return ok
+}
+
+// parseExternalAppPath splits a path like "screeny:split_flap" into (provider, "split_flap", true).
+func (s *Server) parseExternalAppPath(path string) (providers.ExternalAppProvider, string, bool) {
+	parts := strings.SplitN(path, ":", 2)
+	if len(parts) != 2 {
+		return nil, "", false
+	}
+	provider := s.GetExternalProvider(parts[0])
+	if provider == nil {
+		return nil, "", false
+	}
+	return provider, parts[1], true
+}
+
+// GetMaxChunkSizeForDevice returns the chunk size budget based on device type.
+func (s *Server) GetMaxChunkSizeForDevice(device *data.Device) int {
+	if device == nil {
+		return s.Config.ScreenyMaxWebPBytes
+	}
+	// Raspberry Pi / Tronberry clients have expanded memory capabilities.
+	if device.Type == data.DeviceRaspberryPi ||
+		device.Type == data.DeviceRaspberryPiWide ||
+		device.Type == data.DeviceRaspberryPiSquare ||
+		strings.EqualFold(device.Info.FirmwareType, "Tronberry") {
+		if s.Config.ScreenyMaxWebPBytesRPi > 0 {
+			return s.Config.ScreenyMaxWebPBytesRPi
+		}
+		return s.Config.ScreenyMaxWebPBytes
+	}
+	// ESP32 devices have constrained RAM (default 460 KB).
+	if s.Config.ScreenyMaxWebPBytesESP > 0 {
+		return s.Config.ScreenyMaxWebPBytesESP
+	}
+	return 471040
+}
+
+type chunkMeta struct {
+	DurationMs int    `json:"duration_ms"`
+	File       string `json:"file"`
+}
+
+func (s *Server) getAppChunksCacheKey(deviceID, iname string) string {
+	return deviceID + ":" + iname
+}
+
+func (s *Server) getAppChunks(deviceID string, app *data.App) []providers.RenderChunk {
+	if app == nil {
+		return nil
+	}
+	key := s.getAppChunksCacheKey(deviceID, app.Iname)
+	s.appChunksMu.RLock()
+	if cached, ok := s.appChunksCache[key]; ok && len(cached) > 0 {
+		s.appChunksMu.RUnlock()
+		return cached
+	}
+	s.appChunksMu.RUnlock()
+
+	// Try loading from disk
+	deviceWebpDir, err := s.ensureDeviceImageDir(deviceID)
+	if err != nil {
+		return nil
+	}
+	appBasename := fmt.Sprintf("%s-%s", app.Name, app.Iname)
+	metaFile := filepath.Join(deviceWebpDir, fmt.Sprintf("%s_chunks.json", appBasename))
+	metaBytes, err := os.ReadFile(metaFile)
+	if err == nil {
+		var metas []chunkMeta
+		if err := json.Unmarshal(metaBytes, &metas); err == nil && len(metas) > 0 {
+			var chunks []providers.RenderChunk
+			for _, m := range metas {
+				chunkPath := filepath.Join(deviceWebpDir, m.File)
+				b, err := os.ReadFile(chunkPath)
+				if err != nil {
+					chunks = nil
+					break
+				}
+				chunks = append(chunks, providers.RenderChunk{
+					WebPBytes:  b,
+					DurationMs: m.DurationMs,
+				})
+			}
+			if len(chunks) > 0 {
+				s.appChunksMu.Lock()
+				s.appChunksCache[key] = chunks
+				s.appChunksMu.Unlock()
+				return chunks
+			}
+		}
+	}
+
+	// Fallback: check if single .webp exists
+	singlePath := s.getAppWebpPath(deviceWebpDir, app)
+	if b, err := os.ReadFile(singlePath); err == nil && len(b) > 0 {
+		durationMs := app.DisplayTime * 1000
+		if durationMs <= 0 {
+			durationMs = 15000
+		}
+		chunks := []providers.RenderChunk{
+			{
+				WebPBytes:  b,
+				DurationMs: durationMs,
+			},
+		}
+		s.appChunksMu.Lock()
+		s.appChunksCache[key] = chunks
+		s.appChunksMu.Unlock()
+		return chunks
+	}
+
+	return nil
+}
+
+func (s *Server) saveAppChunks(deviceID string, app *data.App, chunks []providers.RenderChunk) error {
+	if app == nil || len(chunks) == 0 {
+		return nil
+	}
+	deviceWebpDir, err := s.ensureDeviceImageDir(deviceID)
+	if err != nil {
+		return err
+	}
+	appBasename := fmt.Sprintf("%s-%s", app.Name, app.Iname)
+
+	// Save chunk 0 as the primary .webp for backward-compatible previews and tools
+	primaryPath := s.getAppWebpPath(deviceWebpDir, app)
+	if err := os.WriteFile(primaryPath, chunks[0].WebPBytes, 0644); err != nil {
+		return err
+	}
+
+	// If multiple chunks, write individual chunk files and chunk metadata JSON
+	var metas []chunkMeta
+	for i, chunk := range chunks {
+		fileName := fmt.Sprintf("%s_chunk_%d.webp", appBasename, i)
+		chunkPath := filepath.Join(deviceWebpDir, fileName)
+		if err := os.WriteFile(chunkPath, chunk.WebPBytes, 0644); err != nil {
+			slog.Error("Failed to write chunk file", "path", chunkPath, "error", err)
+		}
+		metas = append(metas, chunkMeta{
+			DurationMs: chunk.DurationMs,
+			File:       fileName,
+		})
+	}
+
+	metaFile := filepath.Join(deviceWebpDir, fmt.Sprintf("%s_chunks.json", appBasename))
+	metaBytes, err := json.Marshal(metas)
+	if err == nil {
+		_ = os.WriteFile(metaFile, metaBytes, 0644)
+	}
+
+	// Store in memory cache
+	key := s.getAppChunksCacheKey(deviceID, app.Iname)
+	s.appChunksMu.Lock()
+	s.appChunksCache[key] = chunks
+	s.appChunksMu.Unlock()
+
+	return nil
 }

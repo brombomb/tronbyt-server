@@ -22,6 +22,12 @@ services:
       - LOG_LEVEL
       - ENABLE_USER_REGISTRATION
       - GITHUB_TOKEN
+      - SCREENY_STUDIO_URL
+      - SCREENY_FPS
+      - SCREENY_MAX_WEBP_BYTES
+      - SCREENY_MAX_WEBP_BYTES_ESP
+      - SCREENY_MAX_WEBP_BYTES_RPI
+      - SCREENY_SCALE_FILTER
 
 volumes:
   go_modules:
