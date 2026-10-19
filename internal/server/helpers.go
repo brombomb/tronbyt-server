@@ -27,7 +27,6 @@ import (
 	securejoin "github.com/cyphar/filepath-securejoin"
 	"github.com/gorilla/sessions"
 	"github.com/nicksnyder/go-i18n/v2/i18n"
-	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
@@ -666,7 +665,6 @@ func (s *Server) getAppMetadata(appPath string) *apps.AppMetadata {
 	if provider, appID, ok := s.parseExternalAppPath(appPath); ok {
 		extApps, err := provider.ListApps(context.Background())
 		if err == nil {
-			titleCaser := cases.Title(language.English)
 			for _, ext := range extApps {
 				if ext.ID == appID {
 					category := "Visuals"
@@ -675,7 +673,7 @@ func (s *Server) getAppMetadata(appPath string) *apps.AppMetadata {
 					}
 					manifest := apps.Manifest{
 						ID:                  fmt.Sprintf("%s:%s", provider.Name(), ext.ID),
-						Name:                fmt.Sprintf("[%s] %s", titleCaser.String(provider.Name()), ext.Name),
+						Name:                ext.Name,
 						Summary:             ext.Summary,
 						Desc:                ext.Desc,
 						Author:              ext.Author,

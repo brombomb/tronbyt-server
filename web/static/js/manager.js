@@ -1915,7 +1915,7 @@ document.addEventListener('DOMContentLoaded', function () {
       document.querySelectorAll('.app-item').forEach(i => i.classList.remove('selected'));
       appItem.classList.add('selected');
 
-      document.getElementById('selected_app').value = appItem.getAttribute('data-value');
+      document.getElementById('selected_app').value = appItem.getAttribute('data-name') || appItem.getAttribute('data-value');
       document.getElementById('selected_app_path').value = appItem.getAttribute('data-path');
 
       const recInterval = appItem.getAttribute('data-recommended-interval');

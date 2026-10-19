@@ -96,7 +96,7 @@ func (s *Server) handleAddAppGet(w http.ResponseWriter, r *http.Request) {
 			}
 			manifest := apps.Manifest{
 				ID:                  fmt.Sprintf("%s:%s", provider.Name(), ext.ID),
-				Name:                fmt.Sprintf("[%s] %s", titleCaser.String(provider.Name()), ext.Name),
+				Name:                ext.Name,
 				Summary:             ext.Summary,
 				Desc:                ext.Desc,
 				Author:              ext.Author,
@@ -226,6 +226,12 @@ func (s *Server) handleAddAppPost(w http.ResponseWriter, r *http.Request) {
 		slog.Error("Failed to generate unique iname", "error", err)
 		http.Error(w, "Could not generate unique iname", http.StatusInternalServerError)
 		return
+	}
+
+	if s.isExternalAppPath(appPath) {
+		if meta := s.getAppMetadata(appPath); meta != nil && meta.Name != "" {
+			appName = meta.Name
+		}
 	}
 
 	newApp := data.App{
@@ -404,13 +410,15 @@ func (s *Server) handleAppThumbnail(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, path)
 }
 
+const externalAppThumbnailDurationMs = 3000
+
 func (s *Server) ensureCleanPreviewCache(providerName string) string {
 	cacheDir := filepath.Join(s.DataDir, "cache", "previews", providerName)
-	markerFile := filepath.Join(cacheDir, ".unblended_v3")
+	markerFile := filepath.Join(cacheDir, ".previews_v4")
 	if _, err := os.Stat(markerFile); os.IsNotExist(err) {
 		_ = os.RemoveAll(cacheDir)
 		_ = os.MkdirAll(cacheDir, 0755)
-		_ = os.WriteFile(markerFile, []byte("v3"), 0644)
+		_ = os.WriteFile(markerFile, []byte("v4"), 0644)
 
 		s.appChunksMu.Lock()
 		s.appChunksCache = make(map[string][]providers.RenderChunk)
@@ -456,7 +464,7 @@ func (s *Server) serveExternalAppThumbnail(w http.ResponseWriter, r *http.Reques
 			Width:        64,
 			Height:       32,
 			FPS:          15,
-			DurationMs:   600, // 600ms = 9 frames at 15fps, snappy and fast
+			DurationMs:   externalAppThumbnailDurationMs, // 3000ms = smooth 3.0s animation
 			MaxChunkSize: 524288,
 		}
 
@@ -519,7 +527,7 @@ func (s *Server) warmExternalAppThumbnails(provider providers.ExternalAppProvide
 					Width:        64,
 					Height:       32,
 					FPS:          15,
-					DurationMs:   600,
+					DurationMs:   externalAppThumbnailDurationMs,
 					MaxChunkSize: 524288,
 				}
 				chunks, err := provider.RenderAppChunks(ctx, req)
@@ -532,6 +540,26 @@ func (s *Server) warmExternalAppThumbnails(provider providers.ExternalAppProvide
 			})
 		}
 	}()
+}
+
+func (s *Server) preheatExternalAppThumbnails() {
+	s.externalProvidersMu.RLock()
+	providersList := make([]providers.ExternalAppProvider, 0, len(s.externalProviders))
+	for _, p := range s.externalProviders {
+		providersList = append(providersList, p)
+	}
+	s.externalProvidersMu.RUnlock()
+
+	for _, provider := range providersList {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		apps, err := provider.ListApps(ctx)
+		cancel()
+		if err != nil {
+			slog.Warn("Failed to list external apps for preview preheating", "provider", provider.Name(), "error", err)
+			continue
+		}
+		s.warmExternalAppThumbnails(provider, apps)
+	}
 }
 
 func (s *Server) handleConfigAppGet(w http.ResponseWriter, r *http.Request) {

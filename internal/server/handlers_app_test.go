@@ -874,6 +874,47 @@ func TestExternalAppConfigPreview_WithAndWithoutConfig(t *testing.T) {
 	assert.Equal(t, dummyChunkWebP1, rr2.Body.Bytes())
 }
 
+func TestExternalAppConfigGet(t *testing.T) {
+	s := newTestServer(t)
+
+	user := data.User{Username: "testuser"}
+	s.DB.Create(&user)
+	device := data.Device{ID: "testdevice", Username: "testuser"}
+	s.DB.Create(&device)
+
+	extPath := "screeny:clock_test"
+	app := data.App{
+		DeviceID: device.ID,
+		Iname:    "testapp",
+		Name:     "Clock Test",
+		Path:     &extPath,
+	}
+	s.DB.Create(&app)
+
+	mock := &mockExternalProvider{
+		name:   "screeny",
+		chunks: []providers.RenderChunk{{WebPBytes: dummyChunkWebP1, DurationMs: 1500}},
+		apps: []providers.ExternalAppMeta{
+			{ID: "clock_test", Name: "Clock Test"},
+		},
+	}
+	s.RegisterExternalProvider(mock)
+
+	req, _ := http.NewRequest(http.MethodGet, "/devices/testdevice/testapp/config", nil)
+	ctx := context.WithValue(req.Context(), userContextKey, &user)
+	ctx = context.WithValue(ctx, deviceContextKey, &device)
+	ctx = context.WithValue(ctx, appContextKey, &app)
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	s.handleConfigAppGet(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	body := rr.Body.String()
+	assert.Contains(t, body, "schemaConfigContainer")
+	assert.Contains(t, body, "let schema =")
+}
+
 func TestExternalAppPushPreview(t *testing.T) {
 	s := newTestServer(t)
 
@@ -941,7 +982,7 @@ func TestExternalAppGetMetadata(t *testing.T) {
 	meta := s.getAppMetadata("screeny:clocks-minimal")
 	require.NotNil(t, meta)
 	assert.Equal(t, "screeny:clocks-minimal", meta.ID)
-	assert.Equal(t, "[Screeny] Minimal Clock", meta.Name)
+	assert.Equal(t, "Minimal Clock", meta.Name)
 	assert.Equal(t, "A clean minimalist clock", meta.Summary)
 	assert.Equal(t, "Detailed clock description", meta.Desc)
 	assert.Equal(t, "TestAuthor", meta.Author)
@@ -1118,13 +1159,13 @@ func TestHandleCurrentApp_ETagAnd304(t *testing.T) {
 	assert.Empty(t, rr2.Body.Bytes())
 }
 
-func TestExternalAppThumbnail_CacheInvalidationOnV3(t *testing.T) {
+func TestExternalAppThumbnail_CacheInvalidationOnV4(t *testing.T) {
 	s := newTestServer(t)
 
-	// Pre-create cache dir with older .unblended_v2 marker and stale thumbnail
+	// Pre-create cache dir with older .unblended_v3 marker and stale thumbnail
 	cacheDir := filepath.Join(s.DataDir, "cache", "previews", "screeny")
 	require.NoError(t, os.MkdirAll(cacheDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ".unblended_v2"), []byte("v2"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ".unblended_v3"), []byte("v3"), 0644))
 	staleThumbnail := []byte("stale-corrupted-thumbnail")
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "ghosts.webp"), staleThumbnail, 0644))
 
@@ -1158,11 +1199,11 @@ func TestExternalAppThumbnail_CacheInvalidationOnV3(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, freshChunk, rr.Body.Bytes())
 
-	// Verify .unblended_v2 is removed and .unblended_v3 exists
-	_, errV2 := os.Stat(filepath.Join(cacheDir, ".unblended_v2"))
-	assert.True(t, os.IsNotExist(errV2))
+	// Verify .unblended_v3 is removed and .previews_v4 exists
 	_, errV3 := os.Stat(filepath.Join(cacheDir, ".unblended_v3"))
-	assert.NoError(t, errV3)
+	assert.True(t, os.IsNotExist(errV3))
+	_, errV4 := os.Stat(filepath.Join(cacheDir, ".previews_v4"))
+	assert.NoError(t, errV4)
 
 	// Verify app's LastRender was reset to zero time
 	var updatedApp data.App
