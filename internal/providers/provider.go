@@ -11,8 +11,9 @@ const Supports2xKey contextKey = "supports2x"
 
 // RenderChunk represents a single WebP chunk and its exact playback duration.
 type RenderChunk struct {
-	WebPBytes  []byte
-	DurationMs int // Exact playback duration of this chunk's frames
+	WebPBytes     []byte
+	DurationMs    int    // Exact playback duration of this chunk's frames
+	FullWebPBytes []byte // Complete animation across all chunks for web preview
 }
 
 // RenderRequest specifies the rendering parameters for an external app.

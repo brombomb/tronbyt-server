@@ -959,14 +959,21 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 			if fps <= 0 {
 				fps = 30
 			}
-			maxChunkSize := s.GetMaxChunkSizeForDevice(device)
+			dwellSecs := 10
+			if device != nil {
+				dwellSecs = device.GetEffectiveDwellTime(app)
+			}
+			if dwellSecs <= 0 {
+				dwellSecs = 10
+			}
+			previewDurationMs := min(max(dwellSecs*1000, 5000), 15000)
 			req := providers.RenderRequest{
 				AppID:        appID,
 				Width:        width,
 				Height:       height,
 				FPS:          fps,
-				DurationMs:   1500,
-				MaxChunkSize: maxChunkSize,
+				DurationMs:   previewDurationMs,
+				MaxChunkSize: 0, // Unchunked for full browser preview
 				Timezone:     device.GetTimezone(),
 				Config:       configData,
 			}
@@ -982,7 +989,11 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 
 			w.Header().Set("Content-Type", "image/webp")
 			w.Header().Set("Cache-Control", "no-cache")
-			if _, err := w.Write(chunks[0].WebPBytes); err != nil {
+			previewBytes := chunks[0].WebPBytes
+			if len(chunks[0].FullWebPBytes) > 0 {
+				previewBytes = chunks[0].FullWebPBytes
+			}
+			if _, err := w.Write(previewBytes); err != nil {
 				slog.Error("Failed to write image bytes for render config preview", "error", err)
 			}
 			return
@@ -1015,9 +1026,23 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 		if ok {
 			// First check if app already has rendered chunks (only if successfully rendered previously)
 			if !app.LastRender.IsZero() {
-				if existing := s.getAppChunks(device.ID, app); len(existing) > 0 && len(existing[0].WebPBytes) > 0 {
-					s.serveThumbnailBytes(w, r, existing[0].WebPBytes)
-					return
+				deviceWebpDir, err := s.ensureDeviceImageDir(device.ID)
+				if err == nil {
+					primaryPath := s.getAppWebpPath(deviceWebpDir, app)
+					if b, err := os.ReadFile(primaryPath); err == nil && len(b) > 0 {
+						s.serveThumbnailBytes(w, r, b)
+						return
+					}
+				}
+				if existing := s.getAppChunks(device.ID, app); len(existing) > 0 {
+					if len(existing[0].FullWebPBytes) > 0 {
+						s.serveThumbnailBytes(w, r, existing[0].FullWebPBytes)
+						return
+					}
+					if len(existing[0].WebPBytes) > 0 {
+						s.serveThumbnailBytes(w, r, existing[0].WebPBytes)
+						return
+					}
 				}
 			}
 
@@ -1039,23 +1064,34 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 			if fps <= 0 {
 				fps = 30
 			}
-			maxChunkSize := s.GetMaxChunkSizeForDevice(device)
+			dwellSecs := 10
+			if device != nil {
+				dwellSecs = device.GetEffectiveDwellTime(app)
+			}
+			if dwellSecs <= 0 {
+				dwellSecs = 10
+			}
+			previewDurationMs := min(max(dwellSecs*1000, 5000), 15000)
 			req := providers.RenderRequest{
 				AppID:        appID,
 				Width:        width,
 				Height:       height,
 				FPS:          fps,
-				DurationMs:   1500,
-				MaxChunkSize: maxChunkSize,
+				DurationMs:   previewDurationMs,
+				MaxChunkSize: 0,
 				Timezone:     device.GetTimezone(),
 				Config:       app.Config,
 			}
 			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 			defer cancel()
 			chunks, err := provider.RenderAppChunks(ctx, req)
-			if err == nil && len(chunks) > 0 && len(chunks[0].WebPBytes) > 0 {
-				_ = os.WriteFile(cacheFile, chunks[0].WebPBytes, 0644)
-				s.serveThumbnailBytes(w, r, chunks[0].WebPBytes)
+			if err == nil && len(chunks) > 0 {
+				previewBytes := chunks[0].WebPBytes
+				if len(chunks[0].FullWebPBytes) > 0 {
+					previewBytes = chunks[0].FullWebPBytes
+				}
+				_ = os.WriteFile(cacheFile, previewBytes, 0644)
+				s.serveThumbnailBytes(w, r, previewBytes)
 				return
 			}
 		}
@@ -1160,14 +1196,20 @@ func (s *Server) handlePushPreview(w http.ResponseWriter, r *http.Request) {
 		if configBody != nil {
 			previewConfig = configBody
 		}
-		// For hardware push previews, use a snappy 3-second duration (90 frames)
-		// rather than full rotation dwell, giving fast responsive feedback on the physical display.
+		dwellSecs := 5
+		if device != nil {
+			dwellSecs = device.GetEffectiveDwellTime(app)
+		}
+		if dwellSecs <= 0 {
+			dwellSecs = 5
+		}
+		previewDurationMs := min(max(dwellSecs*1000, 5000), 10000)
 		req := providers.RenderRequest{
 			AppID:        appID,
 			Width:        width,
 			Height:       height,
 			FPS:          fps,
-			DurationMs:   3000,
+			DurationMs:   previewDurationMs,
 			MaxChunkSize: maxChunkSize,
 			Timezone:     device.GetTimezone(),
 			Config:       previewConfig,

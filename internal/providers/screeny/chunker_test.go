@@ -86,4 +86,19 @@ func TestChunker_ESP32_Constraint(t *testing.T) {
 	require.Len(t, chunks, 1)
 	assert.LessOrEqual(t, len(chunks[0].WebPBytes), esp32MaxBytes)
 	assert.Equal(t, 30*33, chunks[0].DurationMs)
+	assert.NotEmpty(t, chunks[0].FullWebPBytes)
+}
+
+func TestChunker_FullWebPBytes(t *testing.T) {
+	// Multi-chunk frames should still attach complete FullWebPBytes to chunk 0
+	frames := generateRandomFrames(90, 64, 32, 99)
+	fullBytes, err := EncodeFramesToWebP(frames, 33*time.Millisecond)
+	require.NoError(t, err)
+
+	maxChunkSize := len(fullBytes) / 3
+	chunks, err := SplitFramesIntoChunks(frames, 30, maxChunkSize)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(chunks), 3)
+
+	assert.Equal(t, fullBytes, chunks[0].FullWebPBytes, "chunks[0].FullWebPBytes must match complete unchunked animation")
 }

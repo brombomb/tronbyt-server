@@ -71,8 +71,9 @@ func SplitFramesIntoChunks(frames []*image.RGBA, fps int, maxChunkSize int) ([]p
 		}
 		return []providers.RenderChunk{
 			{
-				WebPBytes:  b,
-				DurationMs: len(frames) * frameDurationMs,
+				WebPBytes:     b,
+				DurationMs:    len(frames) * frameDurationMs,
+				FullWebPBytes: b,
 			},
 		}, nil
 	}
@@ -82,8 +83,9 @@ func SplitFramesIntoChunks(frames []*image.RGBA, fps int, maxChunkSize int) ([]p
 	if err == nil && len(allBytes) <= maxChunkSize {
 		return []providers.RenderChunk{
 			{
-				WebPBytes:  allBytes,
-				DurationMs: len(frames) * frameDurationMs,
+				WebPBytes:     allBytes,
+				DurationMs:    len(frames) * frameDurationMs,
+				FullWebPBytes: allBytes,
 			},
 		}, nil
 	}
@@ -128,6 +130,10 @@ func SplitFramesIntoChunks(frames []*image.RGBA, fps int, maxChunkSize int) ([]p
 			DurationMs: chunkFrames * frameDurationMs,
 		})
 		start = bestEnd
+	}
+
+	if len(chunks) > 0 {
+		chunks[0].FullWebPBytes = allBytes
 	}
 
 	return chunks, nil

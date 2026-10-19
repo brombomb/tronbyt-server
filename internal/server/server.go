@@ -676,9 +676,15 @@ func (s *Server) saveAppChunks(deviceID string, app *data.App, chunks []provider
 	}
 	appBasename := fmt.Sprintf("%s-%s", app.Name, app.Iname)
 
-	// Save chunk 0 as the primary .webp for backward-compatible previews and tools
+	// Save the complete unchunked animation for full web previews and dashboard display.
+	// If FullWebPBytes is provided on chunk 0, use it so browser previews play the full duration
+	// across all chunks. Otherwise fallback to chunks[0].WebPBytes.
 	primaryPath := s.getAppWebpPath(deviceWebpDir, app)
-	if err := os.WriteFile(primaryPath, chunks[0].WebPBytes, 0644); err != nil {
+	primaryBytes := chunks[0].WebPBytes
+	if len(chunks[0].FullWebPBytes) > 0 {
+		primaryBytes = chunks[0].FullWebPBytes
+	}
+	if err := os.WriteFile(primaryPath, primaryBytes, 0644); err != nil {
 		return err
 	}
 

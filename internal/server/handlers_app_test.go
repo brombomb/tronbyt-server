@@ -874,6 +874,74 @@ func TestExternalAppConfigPreview_WithAndWithoutConfig(t *testing.T) {
 	assert.Equal(t, dummyChunkWebP1, rr2.Body.Bytes())
 }
 
+func TestExternalAppConfigPreview_FullAnimationServing(t *testing.T) {
+	s := newTestServer(t)
+
+	user := data.User{Username: "testuser"}
+	s.DB.Create(&user)
+	device := data.Device{ID: "testdevice", Username: "testuser"}
+	s.DB.Create(&device)
+
+	extPath := "screeny:clock_full"
+	app := data.App{
+		DeviceID: device.ID,
+		Iname:    "testapp_full",
+		Name:     "Clock Full",
+		Path:     &extPath,
+	}
+	s.DB.Create(&app)
+
+	fullAnimationBytes := []byte("full-length-complete-animation")
+	chunks := []providers.RenderChunk{
+		{
+			WebPBytes:     dummyChunkWebP1,
+			DurationMs:    1500,
+			FullWebPBytes: fullAnimationBytes,
+		},
+		{
+			WebPBytes:  dummyChunkWebP2,
+			DurationMs: 1500,
+		},
+	}
+	mock := &mockExternalProvider{
+		name:   "screeny",
+		chunks: chunks,
+		apps: []providers.ExternalAppMeta{
+			{ID: "clock_full", Name: "Clock Full"},
+		},
+	}
+	s.RegisterExternalProvider(mock)
+
+	// Config preview on dynamic render should serve FullWebPBytes
+	req, _ := http.NewRequest(http.MethodGet, "/devices/testdevice/installations/testapp_full/preview?config=%7B%7D", nil)
+	ctx := context.WithValue(req.Context(), userContextKey, &user)
+	ctx = context.WithValue(ctx, deviceContextKey, &device)
+	ctx = context.WithValue(ctx, appContextKey, &app)
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	s.handleRenderConfigPreview(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, fullAnimationBytes, rr.Body.Bytes(), "Must serve complete unchunked animation for browser preview")
+
+	// Save app chunks and verify primaryPath contains full animation while chunks contain individual pieces
+	require.NoError(t, s.saveAppChunks(device.ID, &app, chunks))
+
+	deviceWebpDir, err := s.ensureDeviceImageDir(device.ID)
+	require.NoError(t, err)
+	primaryPath := s.getAppWebpPath(deviceWebpDir, &app)
+	savedPrimary, err := os.ReadFile(primaryPath)
+	require.NoError(t, err)
+	assert.Equal(t, fullAnimationBytes, savedPrimary, "primary webp must contain complete animation")
+
+	// Verify getAppChunks still yields the individual hardware chunks
+	loadedChunks := s.getAppChunks(device.ID, &app)
+	require.Len(t, loadedChunks, 2)
+	assert.Equal(t, dummyChunkWebP1, loadedChunks[0].WebPBytes)
+	assert.Equal(t, dummyChunkWebP2, loadedChunks[1].WebPBytes)
+}
+
 func TestExternalAppConfigGet(t *testing.T) {
 	s := newTestServer(t)
 

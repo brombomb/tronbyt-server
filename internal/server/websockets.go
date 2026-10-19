@@ -312,9 +312,9 @@ func (s *Server) wsWriteLoop(ctx context.Context, conn *websocket.Conn, initialD
 						return
 					}
 
-					if chunkIdx == 0 && sendImmediate {
+					if (chunkIdx == 0 && sendImmediate) || chunkIdx > 0 {
 						if err := conn.WriteJSON(map[string]bool{"immediate": true}); err != nil {
-							slog.Error("Failed to write immediate WS message", "error", err)
+							slog.Error("Failed to write immediate WS message", "chunk", chunkIdx, "error", err)
 							return
 						}
 						sendImmediate = false
