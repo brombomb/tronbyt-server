@@ -42,7 +42,8 @@ type Server struct {
 	installCounts map[string]int64 // public app ID -> Niblet install count
 	usageRunning  atomic.Bool      // a community app stats sync is in progress
 	usageForce    atomic.Bool      // a consent change awaits a sync that ignores the retry wait
-	usageSyncs    sync.WaitGroup   // background syncs started by a consent change
+	usageSyncs        sync.WaitGroup // background syncs started by a consent change
+	backgroundRenders sync.WaitGroup // background renders triggered asynchronously
 	DB            *gorm.DB
 	Router        *http.ServeMux
 	DataDir       string
@@ -71,6 +72,8 @@ type Server struct {
 	deviceChunkIndices    map[string]int
 	deviceCurrentChunkApp map[string]string
 	deviceChunkMu         sync.Mutex
+	inFlightRenders       map[string]bool
+	inFlightRendersMu     sync.Mutex
 
 	// SchemaCache, when set, allows forcing a one-shot refetch of an app's
 	// cached HTTP responses so dynamic schema data (e.g. dropdown options
@@ -131,6 +134,7 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 		appChunksCache:        make(map[string][]providers.RenderChunk),
 		deviceChunkIndices:    make(map[string]int),
 		deviceCurrentChunkApp: make(map[string]string),
+		inFlightRenders:       make(map[string]bool),
 	}
 
 	// Load Settings from DB

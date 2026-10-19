@@ -113,9 +113,28 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 
 	// External Provider App (e.g. Screeny)
 	if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
+		appKey := fmt.Sprintf("%s:%s", device.ID, app.Iname)
+		s.inFlightRendersMu.Lock()
+		if s.inFlightRenders[appKey] {
+			s.inFlightRendersMu.Unlock()
+			slog.Debug("Render already in flight for external app, skipping redundant trigger", "app", appBasename)
+			return true
+		}
+		s.inFlightRenders[appKey] = true
+		s.inFlightRendersMu.Unlock()
+		defer func() {
+			s.inFlightRendersMu.Lock()
+			delete(s.inFlightRenders, appKey)
+			s.inFlightRendersMu.Unlock()
+		}()
+
 		now := time.Now()
 		forceRender := s.filtersChangedSinceLastRender(device, app)
-		if forceRender || time.Since(app.LastRender) > time.Duration(app.UInterval)*time.Minute {
+		uinterval := app.UInterval
+		if uinterval <= 0 {
+			uinterval = 10
+		}
+		if forceRender || time.Since(app.LastRender) > time.Duration(uinterval)*time.Minute {
 			slog.Info("Rendering external app", "provider", provider.Name(), "app", appBasename)
 			startTime := time.Now()
 
@@ -153,6 +172,11 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 				s.metrics.renderTotal.WithLabelValues("error").Inc()
 				slog.Error("Error rendering external app", "provider", provider.Name(), "app", appBasename, "error", err)
 
+				// Update in-memory timestamps so erroring apps don't hammer the provider in a tight loop
+				app.LastRender = now
+				app.LastRenderDur = renderDur
+				app.EmptyLastRender = true
+
 				// Graceful fallback: check if we have previously cached chunks
 				if existing := s.getAppChunks(device.ID, app); len(existing) > 0 {
 					slog.Warn("Reusing previously cached chunk(s) for unreachable external app", "app", appBasename)
@@ -188,7 +212,10 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 			rowsAffected, err := gorm.G[data.App](s.DB).Where("id = ?", app.ID).
 				Select("LastRender", "LastSuccessfulRender", "LastRenderDur", "EmptyLastRender").
 				Updates(ctx, appUpdates)
-			if err != nil || rowsAffected == 0 {
+			if err != nil {
+				slog.Error("Failed to update app state in DB", "app", appBasename, "error", err)
+			} else if rowsAffected == 0 {
+				slog.Info("App no longer exists in DB, aborting", "app", appBasename)
 				return false
 			}
 
@@ -241,8 +268,12 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 	// 3. Starlark App - Check Interval
 	now := time.Now()
 	forceRender := s.filtersChangedSinceLastRender(device, app)
+	uinterval := app.UInterval
+	if uinterval <= 0 {
+		uinterval = 10
+	}
 	// uinterval is minutes
-	if forceRender || time.Since(app.LastRender) > time.Duration(app.UInterval)*time.Minute {
+	if forceRender || time.Since(app.LastRender) > time.Duration(uinterval)*time.Minute {
 		slog.Info("Rendering app", "app", appBasename)
 
 		startTime := time.Now()

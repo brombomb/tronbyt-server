@@ -86,7 +86,6 @@ func (s *Server) handleAddAppGet(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(extApps) > 0 {
 			providerNames = append(providerNames, titleCaser.String(provider.Name()))
-			go s.prewarmExternalPreviews(provider, extApps)
 		}
 		for _, ext := range extApps {
 			category := "Visuals"
@@ -94,17 +93,18 @@ func (s *Server) handleAddAppGet(w http.ResponseWriter, r *http.Request) {
 				category = "Clocks"
 			}
 			manifest := apps.Manifest{
-				ID:          fmt.Sprintf("%s:%s", provider.Name(), ext.ID),
-				Name:        fmt.Sprintf("[%s] %s", titleCaser.String(provider.Name()), ext.Name),
-				Summary:     ext.Summary,
-				Desc:        ext.Desc,
-				Author:      ext.Author,
-				FileName:    ext.ID,
-				PackageName: ext.ID,
-				Supports2x:  ext.Supports2x,
-				Category:    category,
-				Tags:        ext.Tags,
-				Provider:    provider.Name(),
+				ID:                  fmt.Sprintf("%s:%s", provider.Name(), ext.ID),
+				Name:                fmt.Sprintf("[%s] %s", titleCaser.String(provider.Name()), ext.Name),
+				Summary:             ext.Summary,
+				Desc:                ext.Desc,
+				Author:              ext.Author,
+				FileName:            ext.ID,
+				PackageName:         ext.ID,
+				Supports2x:          ext.Supports2x,
+				Category:            category,
+				Tags:                ext.Tags,
+				Provider:            provider.Name(),
+				RecommendedInterval: 10,
 			}
 			appMeta := apps.AppMetadata{
 				Manifest: manifest,
@@ -200,12 +200,8 @@ func (s *Server) handleAddAppPost(w http.ResponseWriter, r *http.Request) {
 			uinterval = val
 		}
 	}
-	// If not set (was -1), default to 10
-	if uinterval == -1 {
-		uinterval = 10
-	}
-	// Ensure uinterval is not negative
-	if uinterval < 0 {
+	// If not set or <= 0, default to 10
+	if uinterval <= 0 {
 		uinterval = 10
 	}
 
@@ -316,7 +312,17 @@ func (s *Server) handleAddAppPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Trigger initial render
-	s.possiblyRender(r.Context(), &newApp, device, user)
+	if s.isExternalAppPath(appPath) {
+		// External apps take longer to render (capturing 30 FPS stream).
+		// Render in background so user is immediately redirected to the config screen without hanging.
+		s.backgroundRenders.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			s.possiblyRender(ctx, &newApp, device, user)
+		})
+	} else {
+		s.possiblyRender(r.Context(), &newApp, device, user)
+	}
 
 	// Notify Dashboard & Device
 	s.notifyDashboard(user.Username, WSEvent{Type: "apps_changed", DeviceID: device.ID})
@@ -441,31 +447,6 @@ func (s *Server) serveExternalAppThumbnail(w http.ResponseWriter, r *http.Reques
 
 	slog.Warn("Failed to render external app thumbnail", "provider", provider.Name(), "app", appID, "error", err)
 	http.NotFound(w, r)
-}
-
-func (s *Server) prewarmExternalPreviews(provider providers.ExternalAppProvider, extApps []providers.ExternalAppMeta) {
-	cacheDir := filepath.Join(s.DataDir, "cache", "previews", provider.Name())
-	for _, ext := range extApps {
-		cacheFile := filepath.Join(cacheDir, ext.ID+".webp")
-		if _, err := os.Stat(cacheFile); err == nil {
-			continue // already cached
-		}
-		req := providers.RenderRequest{
-			AppID:        ext.ID,
-			Width:        64,
-			Height:       32,
-			FPS:          15,
-			DurationMs:   1000,
-			MaxChunkSize: 524288,
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		chunks, err := provider.RenderAppChunks(ctx, req)
-		cancel()
-		if err == nil && len(chunks) > 0 && len(chunks[0].WebPBytes) > 0 {
-			_ = os.MkdirAll(cacheDir, 0755)
-			_ = os.WriteFile(cacheFile, chunks[0].WebPBytes, 0644)
-		}
-	}
 }
 
 func (s *Server) handleConfigAppGet(w http.ResponseWriter, r *http.Request) {
@@ -635,6 +616,9 @@ func (s *Server) handleConfigAppPost(w http.ResponseWriter, r *http.Request) {
 	// Update App
 	app.Enabled = payload.Enabled
 	app.AutoPin = payload.AutoPin
+	if payload.UInterval <= 0 {
+		payload.UInterval = 10
+	}
 	app.UInterval = payload.UInterval
 	app.DisplayTime = payload.DisplayTime
 	app.Notes = payload.Notes
@@ -1037,16 +1021,14 @@ func (s *Server) handlePushPreview(w http.ResponseWriter, r *http.Request) {
 		if configBody != nil {
 			previewConfig = configBody
 		}
-		dwellSecs := 15
-		if device != nil {
-			dwellSecs = device.GetEffectiveDwellTime(app)
-		}
+		// For hardware push previews, use a snappy 3-second duration (90 frames)
+		// rather than full rotation dwell, giving fast responsive feedback on the physical display.
 		req := providers.RenderRequest{
 			AppID:        appID,
 			Width:        width,
 			Height:       height,
 			FPS:          fps,
-			DurationMs:   dwellSecs * 1000,
+			DurationMs:   3000,
 			MaxChunkSize: maxChunkSize,
 			Timezone:     device.GetTimezone(),
 			Config:       previewConfig,

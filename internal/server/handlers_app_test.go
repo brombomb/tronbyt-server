@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -929,4 +930,65 @@ func TestExternalAppGetMetadata(t *testing.T) {
 	assert.Equal(t, "TestAuthor", meta.Author)
 	assert.Equal(t, "Clocks", meta.Category)
 	assert.Equal(t, "screeny", meta.Provider)
+	assert.Equal(t, 10, meta.RecommendedInterval)
 }
+
+func TestExternalAppUIntervalFallbackAndNonBlockingAdd(t *testing.T) {
+	s := newTestServer(t)
+
+	user := data.User{Username: "testuser"}
+	s.DB.Create(&user)
+	device := data.Device{ID: "testdevice", Username: "testuser"}
+	s.DB.Create(&device)
+
+	mock := &mockExternalProvider{
+		name:   "screeny",
+		chunks: []providers.RenderChunk{{WebPBytes: dummyChunkWebP1, DurationMs: 1000}},
+		apps: []providers.ExternalAppMeta{
+			{ID: "flock", Name: "Flock"},
+		},
+	}
+	s.RegisterExternalProvider(mock)
+
+	// Test 1: handleAddAppPost with uinterval="0" - should default to 10 and redirect immediately
+	form := url.Values{}
+	form.Add("name", "Flock")
+	form.Add("path", "screeny:flock")
+	form.Add("uinterval", "0") // 0 should be corrected to 10
+
+	req, _ := http.NewRequest(http.MethodPost, "/devices/testdevice/addapp", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	ctx := context.WithValue(req.Context(), userContextKey, &user)
+	ctx = context.WithValue(ctx, deviceContextKey, &device)
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	s.handleAddAppPost(rr, req)
+
+	assert.Equal(t, http.StatusSeeOther, rr.Code)
+	redirectLocation := rr.Header().Get("Location")
+	assert.Contains(t, redirectLocation, "/config?delete_on_cancel=true")
+
+	var savedApp data.App
+	err := s.DB.Where("device_id = ? AND name = ?", device.ID, "Flock").First(&savedApp).Error
+	require.NoError(t, err)
+	assert.Equal(t, 10, savedApp.UInterval) // verified uinterval corrected to 10
+
+	// Test 2: In-flight deduplication in possiblyRender
+	appKey := fmt.Sprintf("%s:%s", device.ID, savedApp.Iname)
+	s.inFlightRendersMu.Lock()
+	s.inFlightRenders[appKey] = true
+	s.inFlightRendersMu.Unlock()
+
+	// While in flight, possiblyRender should return true immediately without rendering
+	rendered := s.possiblyRender(context.Background(), &savedApp, &device, &user)
+	assert.True(t, rendered)
+
+	s.inFlightRendersMu.Lock()
+	delete(s.inFlightRenders, appKey)
+	s.inFlightRendersMu.Unlock()
+
+	// Wait for any background renders to complete before test cleanup
+	s.backgroundRenders.Wait()
+}
+

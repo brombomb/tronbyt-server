@@ -682,9 +682,10 @@ func (s *Server) getAppMetadata(appPath string) *apps.AppMetadata {
 						FileName:    ext.ID,
 						PackageName: ext.ID,
 						Supports2x:  ext.Supports2x,
-						Category:    category,
-						Tags:        ext.Tags,
-						Provider:    provider.Name(),
+						Category:            category,
+						Tags:                ext.Tags,
+						Provider:            provider.Name(),
+						RecommendedInterval: 10,
 					}
 					return &apps.AppMetadata{
 						Manifest: manifest,

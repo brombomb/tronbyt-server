@@ -1919,8 +1919,9 @@ document.addEventListener('DOMContentLoaded', function () {
       document.getElementById('selected_app_path').value = appItem.getAttribute('data-path');
 
       const recInterval = appItem.getAttribute('data-recommended-interval');
-      if (recInterval) {
-        document.getElementById('uinterval').value = recInterval;
+      const recInt = parseInt(recInterval, 10);
+      if (!isNaN(recInt) && recInt > 0) {
+        document.getElementById('uinterval').value = recInt;
       } else {
         document.getElementById('uinterval').value = 10;
       }

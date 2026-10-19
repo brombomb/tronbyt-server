@@ -33,7 +33,7 @@ type AdapterConfig struct {
 
 // ScreenyAdapter implements the providers.ExternalAppProvider interface for gotwalt/screeny.
 type ScreenyAdapter struct {
-	mu           sync.Mutex
+	sem          chan struct{}
 	studioURL    string
 	fps          int
 	maxWebPBytes int
@@ -81,6 +81,7 @@ func NewAdapter(cfg AdapterConfig) *ScreenyAdapter {
 	}
 
 	return &ScreenyAdapter{
+		sem:          make(chan struct{}, 1),
 		studioURL:    studioURL,
 		fps:          fps,
 		maxWebPBytes: maxBytes,
@@ -163,8 +164,17 @@ func (a *ScreenyAdapter) GetAppSchema(ctx context.Context, appID string) ([]byte
 // capturing frames and packaging them into WebP chunks.
 func (a *ScreenyAdapter) RenderAppChunks(ctx context.Context, req providers.RenderRequest) ([]providers.RenderChunk, error) {
 	// Mutex lock to ensure sequential rendering access to screeny-studio instance.
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	// Uses a 1-capacity channel with select on ctx.Done so cancelled/timed-out requests never queue up.
+	select {
+	case a.sem <- struct{}{}:
+		defer func() { <-a.sem }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	fps := req.FPS
 	if fps <= 0 {
