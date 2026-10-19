@@ -34,30 +34,31 @@ import (
 	"github.com/nicksnyder/go-i18n/v2/i18n"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/text/language"
 	"gorm.io/gorm"
 )
 
 type Server struct {
-	installCounts map[string]int64 // public app ID -> Niblet install count
-	usageRunning  atomic.Bool      // a community app stats sync is in progress
-	usageForce    atomic.Bool      // a consent change awaits a sync that ignores the retry wait
-	usageSyncs        sync.WaitGroup // background syncs started by a consent change
-	backgroundRenders sync.WaitGroup // background renders triggered asynchronously
-	DB            *gorm.DB
-	Router        *http.ServeMux
-	DataDir       string
-	BaseTemplates *template.Template
-	PageTemplates map[string]*template.Template
-	Config        *config.Settings
-	Store         *sessions.CookieStore
-	Bundle        *i18n.Bundle // Add i18n bundle
-	Broadcaster   *syncer.Broadcaster
-	Upgrader      *websocket.Upgrader
-	PromRegistry  prometheus.Registerer
-	PromGatherer  prometheus.Gatherer
-	metrics       *appMetrics
-	OIDCProvider  *OIDCProvider
+	installCounts     map[string]int64 // public app ID -> Niblet install count
+	usageRunning      atomic.Bool      // a community app stats sync is in progress
+	usageForce        atomic.Bool      // a consent change awaits a sync that ignores the retry wait
+	usageSyncs        sync.WaitGroup   // background syncs started by a consent change
+	backgroundRenders sync.WaitGroup   // background renders triggered asynchronously
+	DB                *gorm.DB
+	Router            *http.ServeMux
+	DataDir           string
+	BaseTemplates     *template.Template
+	PageTemplates     map[string]*template.Template
+	Config            *config.Settings
+	Store             *sessions.CookieStore
+	Bundle            *i18n.Bundle // Add i18n bundle
+	Broadcaster       *syncer.Broadcaster
+	Upgrader          *websocket.Upgrader
+	PromRegistry      prometheus.Registerer
+	PromGatherer      prometheus.Gatherer
+	metrics           *appMetrics
+	OIDCProvider      *OIDCProvider
 
 	systemAppsCache                      []apps.AppMetadata
 	systemAppsCacheMutex                 sync.RWMutex
@@ -75,6 +76,7 @@ type Server struct {
 	inFlightRenders       map[string]bool
 	renderPending         map[string]bool
 	inFlightRendersMu     sync.Mutex
+	thumbnailSingleFlight singleflight.Group
 
 	// SchemaCache, when set, allows forcing a one-shot refetch of an app's
 	// cached HTTP responses so dynamic schema data (e.g. dropdown options

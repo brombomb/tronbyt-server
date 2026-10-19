@@ -87,6 +87,7 @@ func (s *Server) handleAddAppGet(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(extApps) > 0 {
 			providerNames = append(providerNames, titleCaser.String(provider.Name()))
+			s.warmExternalAppThumbnails(provider, extApps)
 		}
 		for _, ext := range extApps {
 			category := "Visuals"
@@ -313,15 +314,7 @@ func (s *Server) handleAddAppPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Trigger initial render
-	if s.isExternalAppPath(appPath) {
-		// External apps take longer to render (capturing 30 FPS stream).
-		// Render in background so user is immediately redirected to the config screen without hanging.
-		s.backgroundRenders.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			s.possiblyRender(ctx, &newApp, device, user)
-		})
-	} else {
+	if !s.isExternalAppPath(appPath) {
 		s.possiblyRender(r.Context(), &newApp, device, user)
 	}
 
@@ -411,55 +404,134 @@ func (s *Server) handleAppThumbnail(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, path)
 }
 
-func (s *Server) serveExternalAppThumbnail(w http.ResponseWriter, r *http.Request, provider providers.ExternalAppProvider, appID string) {
-	cacheDir := filepath.Join(s.DataDir, "cache", "previews", provider.Name())
-	cacheFile := filepath.Join(cacheDir, appID+".webp")
-
-	// Invalidate legacy blended/crossfaded previews once via marker file
-	markerFile := filepath.Join(cacheDir, ".unblended_v2")
+func (s *Server) ensureCleanPreviewCache(providerName string) string {
+	cacheDir := filepath.Join(s.DataDir, "cache", "previews", providerName)
+	markerFile := filepath.Join(cacheDir, ".unblended_v3")
 	if _, err := os.Stat(markerFile); os.IsNotExist(err) {
 		_ = os.RemoveAll(cacheDir)
 		_ = os.MkdirAll(cacheDir, 0755)
-		_ = os.WriteFile(markerFile, []byte("v2"), 0644)
+		_ = os.WriteFile(markerFile, []byte("v3"), 0644)
+
+		s.appChunksMu.Lock()
+		s.appChunksCache = make(map[string][]providers.RenderChunk)
+		s.appChunksMu.Unlock()
+
+		if s.DB != nil {
+			_, _ = gorm.G[data.App](s.DB).Where("path LIKE ?", providerName+":%").
+				Update(context.Background(), "LastRender", time.Time{})
+		}
 	}
+	return cacheDir
+}
+
+func (s *Server) serveExternalAppThumbnail(w http.ResponseWriter, r *http.Request, provider providers.ExternalAppProvider, appID string) {
+	cacheDir := s.ensureCleanPreviewCache(provider.Name())
+	cacheFile := filepath.Join(cacheDir, appID+".webp")
 
 	forceRefresh := r.URL.Query().Get("refresh") == "true"
 
 	// 1. Serve from disk cache if available and not explicitly refreshing
 	if !forceRefresh {
-		if _, err := os.Stat(cacheFile); err == nil {
-			w.Header().Set("Content-Type", "image/webp")
-			w.Header().Set("Cache-Control", "public, max-age=86400")
-			http.ServeFile(w, r, cacheFile)
+		if b, err := os.ReadFile(cacheFile); err == nil && len(b) > 0 {
+			s.serveThumbnailBytes(w, r, b)
 			return
 		}
 	}
 
-	// 2. Render 1.0s preview chunk on demand
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
+	// 2. Render preview chunk on demand using singleflight to deduplicate concurrent requests
+	key := fmt.Sprintf("%s:%s", provider.Name(), appID)
+	val, err, _ := s.thumbnailSingleFlight.Do(key, func() (any, error) {
+		// Re-check disk cache inside singleflight
+		if !forceRefresh {
+			if b, err := os.ReadFile(cacheFile); err == nil && len(b) > 0 {
+				return b, nil
+			}
+		}
 
-	req := providers.RenderRequest{
-		AppID:        appID,
-		Width:        64,
-		Height:       32,
-		FPS:          15,
-		DurationMs:   1000,
-		MaxChunkSize: 524288,
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
 
-	chunks, err := provider.RenderAppChunks(ctx, req)
-	if err == nil && len(chunks) > 0 && len(chunks[0].WebPBytes) > 0 {
+		req := providers.RenderRequest{
+			AppID:        appID,
+			Width:        64,
+			Height:       32,
+			FPS:          15,
+			DurationMs:   600, // 600ms = 9 frames at 15fps, snappy and fast
+			MaxChunkSize: 524288,
+		}
+
+		chunks, err := provider.RenderAppChunks(ctx, req)
+		if err != nil || len(chunks) == 0 || len(chunks[0].WebPBytes) == 0 {
+			return nil, fmt.Errorf("rendering external app thumbnail: %w", err)
+		}
+
 		_ = os.MkdirAll(cacheDir, 0755)
 		_ = os.WriteFile(cacheFile, chunks[0].WebPBytes, 0644)
-		w.Header().Set("Content-Type", "image/webp")
-		w.Header().Set("Cache-Control", "public, max-age=86400")
-		_, _ = w.Write(chunks[0].WebPBytes)
+		return chunks[0].WebPBytes, nil
+	})
+
+	if err != nil {
+		slog.Warn("Failed to render external app thumbnail", "provider", provider.Name(), "app", appID, "error", err)
+		http.NotFound(w, r)
 		return
 	}
 
-	slog.Warn("Failed to render external app thumbnail", "provider", provider.Name(), "app", appID, "error", err)
+	if b, ok := val.([]byte); ok && len(b) > 0 {
+		s.serveThumbnailBytes(w, r, b)
+		return
+	}
+
 	http.NotFound(w, r)
+}
+
+func (s *Server) serveThumbnailBytes(w http.ResponseWriter, r *http.Request, b []byte) {
+	h := sha256.Sum256(b)
+	etag := fmt.Sprintf("\"%x\"", h[:16])
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")
+
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/webp")
+	_, _ = w.Write(b)
+}
+
+func (s *Server) warmExternalAppThumbnails(provider providers.ExternalAppProvider, apps []providers.ExternalAppMeta) {
+	cacheDir := s.ensureCleanPreviewCache(provider.Name())
+	go func() {
+		for _, app := range apps {
+			cacheFile := filepath.Join(cacheDir, app.ID+".webp")
+			if _, err := os.Stat(cacheFile); err == nil {
+				continue // already cached
+			}
+			key := fmt.Sprintf("%s:%s", provider.Name(), app.ID)
+			_, _, _ = s.thumbnailSingleFlight.Do(key, func() (any, error) {
+				if b, err := os.ReadFile(cacheFile); err == nil && len(b) > 0 {
+					return b, nil
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer cancel()
+				req := providers.RenderRequest{
+					AppID:        app.ID,
+					Width:        64,
+					Height:       32,
+					FPS:          15,
+					DurationMs:   600,
+					MaxChunkSize: 524288,
+				}
+				chunks, err := provider.RenderAppChunks(ctx, req)
+				if err != nil || len(chunks) == 0 || len(chunks[0].WebPBytes) == 0 {
+					return nil, err
+				}
+				_ = os.MkdirAll(cacheDir, 0755)
+				_ = os.WriteFile(cacheFile, chunks[0].WebPBytes, 0644)
+				return chunks[0].WebPBytes, nil
+			})
+		}
+	}()
 }
 
 func (s *Server) handleConfigAppGet(w http.ResponseWriter, r *http.Request) {
@@ -709,7 +781,17 @@ func (s *Server) handleConfigAppPost(w http.ResponseWriter, r *http.Request) {
 	// Trigger Render
 	// Force render by resetting LastRender
 	app.LastRender = time.Time{}
-	s.possiblyRender(r.Context(), app, device, user)
+	if app.Path != nil && s.isExternalAppPath(*app.Path) {
+		s.backgroundRenders.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			s.possiblyRender(ctx, app, device, user)
+			s.notifyDashboard(user.Username, WSEvent{Type: "apps_changed", DeviceID: device.ID})
+			s.notifyDashboard(user.Username, WSEvent{Type: "image_updated", DeviceID: device.ID})
+		})
+	} else {
+		s.possiblyRender(r.Context(), app, device, user)
+	}
 
 	// Notify Dashboard & Device
 	s.notifyDashboard(user.Username, WSEvent{Type: "apps_changed", DeviceID: device.ID})
@@ -860,7 +942,7 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 				Timezone:     device.GetTimezone(),
 				Config:       configData,
 			}
-			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 			defer cancel()
 
 			chunks, err := provider.RenderAppChunks(ctx, req)
@@ -903,21 +985,19 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 	if app.Path != nil && s.isExternalAppPath(*app.Path) {
 		provider, appID, ok := s.parseExternalAppPath(*app.Path)
 		if ok {
-			// First check if app already has rendered chunks
-			if existing := s.getAppChunks(device.ID, app); len(existing) > 0 && len(existing[0].WebPBytes) > 0 {
-				w.Header().Set("Content-Type", "image/webp")
-				w.Header().Set("Cache-Control", "no-cache")
-				_, _ = w.Write(existing[0].WebPBytes)
-				return
+			// First check if app already has rendered chunks (only if successfully rendered previously)
+			if !app.LastRender.IsZero() {
+				if existing := s.getAppChunks(device.ID, app); len(existing) > 0 && len(existing[0].WebPBytes) > 0 {
+					s.serveThumbnailBytes(w, r, existing[0].WebPBytes)
+					return
+				}
 			}
 
 			// Second check if we have a thumbnail cached on disk
-			cacheDir := filepath.Join(s.DataDir, "cache", "previews", provider.Name())
+			cacheDir := s.ensureCleanPreviewCache(provider.Name())
 			cacheFile := filepath.Join(cacheDir, appID+".webp")
 			if b, err := os.ReadFile(cacheFile); err == nil && len(b) > 0 {
-				w.Header().Set("Content-Type", "image/webp")
-				w.Header().Set("Cache-Control", "no-cache")
-				_, _ = w.Write(b)
+				s.serveThumbnailBytes(w, r, b)
 				return
 			}
 
@@ -942,13 +1022,12 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 				Timezone:     device.GetTimezone(),
 				Config:       app.Config,
 			}
-			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 			defer cancel()
 			chunks, err := provider.RenderAppChunks(ctx, req)
 			if err == nil && len(chunks) > 0 && len(chunks[0].WebPBytes) > 0 {
-				w.Header().Set("Content-Type", "image/webp")
-				w.Header().Set("Cache-Control", "no-cache")
-				_, _ = w.Write(chunks[0].WebPBytes)
+				_ = os.WriteFile(cacheFile, chunks[0].WebPBytes, 0644)
+				s.serveThumbnailBytes(w, r, chunks[0].WebPBytes)
 				return
 			}
 		}

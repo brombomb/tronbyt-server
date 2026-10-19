@@ -674,14 +674,14 @@ func (s *Server) getAppMetadata(appPath string) *apps.AppMetadata {
 						category = "Clocks"
 					}
 					manifest := apps.Manifest{
-						ID:          fmt.Sprintf("%s:%s", provider.Name(), ext.ID),
-						Name:        fmt.Sprintf("[%s] %s", titleCaser.String(provider.Name()), ext.Name),
-						Summary:     ext.Summary,
-						Desc:        ext.Desc,
-						Author:      ext.Author,
-						FileName:    ext.ID,
-						PackageName: ext.ID,
-						Supports2x:  ext.Supports2x,
+						ID:                  fmt.Sprintf("%s:%s", provider.Name(), ext.ID),
+						Name:                fmt.Sprintf("[%s] %s", titleCaser.String(provider.Name()), ext.Name),
+						Summary:             ext.Summary,
+						Desc:                ext.Desc,
+						Author:              ext.Author,
+						FileName:            ext.ID,
+						PackageName:         ext.ID,
+						Supports2x:          ext.Supports2x,
 						Category:            category,
 						Tags:                ext.Tags,
 						Provider:            provider.Name(),

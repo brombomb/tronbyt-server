@@ -194,9 +194,9 @@ func TestScreenyAdapter_DiscardsTransitionFrames(t *testing.T) {
 				time.Sleep(5 * time.Millisecond)
 			}
 
-			// 2. Send 10 post-transition frames (timer = 2.1s >= 2.05s) with green pixels
+			// 2. Send 10 post-transition frames (timer = 2.2s >= 2.10s) with green pixels
 			greenPacket := make([]byte, PreviewPacketLen)
-			binary.LittleEndian.PutUint32(greenPacket[4:8], math.Float32bits(2.1))
+			binary.LittleEndian.PutUint32(greenPacket[4:8], math.Float32bits(2.2))
 			for p := range NPixels {
 				greenPacket[PreviewHeaderLen+p*3+1] = 255 // Green
 			}
@@ -215,7 +215,7 @@ func TestScreenyAdapter_DiscardsTransitionFrames(t *testing.T) {
 		StudioURL:         server.URL,
 		FPS:               30,
 		MaxWebPBytes:      5242880,
-		TransitionSkipSec: 2.05,
+		TransitionSkipSec: DefaultTransitionSkipSec,
 	})
 
 	// Request 5 frames (166ms at 30 fps)
@@ -230,4 +230,3 @@ func TestScreenyAdapter_DiscardsTransitionFrames(t *testing.T) {
 		assert.Equal(t, uint8(255), c.G, "frame %d should have green from post-transition frame", i)
 	}
 }
-

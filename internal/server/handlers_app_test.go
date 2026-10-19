@@ -13,7 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"tronbyt-server/internal/apps"
 	"tronbyt-server/internal/data"
@@ -1116,4 +1118,89 @@ func TestHandleCurrentApp_ETagAnd304(t *testing.T) {
 	assert.Empty(t, rr2.Body.Bytes())
 }
 
+func TestExternalAppThumbnail_CacheInvalidationOnV3(t *testing.T) {
+	s := newTestServer(t)
 
+	// Pre-create cache dir with older .unblended_v2 marker and stale thumbnail
+	cacheDir := filepath.Join(s.DataDir, "cache", "previews", "screeny")
+	require.NoError(t, os.MkdirAll(cacheDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ".unblended_v2"), []byte("v2"), 0644))
+	staleThumbnail := []byte("stale-corrupted-thumbnail")
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "ghosts.webp"), staleThumbnail, 0644))
+
+	// Pre-populate an app in DB with screeny path and non-zero LastRender
+	extPath := "screeny:ghosts"
+	now := time.Now()
+	app := data.App{
+		DeviceID:   "testdevice",
+		Iname:      "ghostsiname",
+		Name:       "Ghosts",
+		Path:       &extPath,
+		LastRender: now,
+	}
+	s.DB.Create(&app)
+
+	// Register provider with fresh chunk
+	freshChunk := []byte("fresh-unblended-chunk")
+	mock := &mockExternalProvider{
+		name:   "screeny",
+		chunks: []providers.RenderChunk{{WebPBytes: freshChunk, DurationMs: 1000}},
+		apps:   []providers.ExternalAppMeta{{ID: "ghosts", Name: "Ghosts"}},
+	}
+	s.RegisterExternalProvider(mock)
+
+	// Request thumbnail
+	req, _ := http.NewRequest(http.MethodGet, "/preview/app/screeny:ghosts", nil)
+	req.SetPathValue("id", "screeny:ghosts")
+	rr := httptest.NewRecorder()
+	s.handleAppThumbnail(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, freshChunk, rr.Body.Bytes())
+
+	// Verify .unblended_v2 is removed and .unblended_v3 exists
+	_, errV2 := os.Stat(filepath.Join(cacheDir, ".unblended_v2"))
+	assert.True(t, os.IsNotExist(errV2))
+	_, errV3 := os.Stat(filepath.Join(cacheDir, ".unblended_v3"))
+	assert.NoError(t, errV3)
+
+	// Verify app's LastRender was reset to zero time
+	var updatedApp data.App
+	require.NoError(t, s.DB.Where("id = ?", app.ID).First(&updatedApp).Error)
+	assert.True(t, updatedApp.LastRender.IsZero())
+}
+
+func TestExternalAppThumbnail_SingleFlightDeduplication(t *testing.T) {
+	s := newTestServer(t)
+
+	mock := &mockExternalProvider{
+		name:   "screeny",
+		chunks: []providers.RenderChunk{{WebPBytes: dummyChunkWebP1, DurationMs: 1000}},
+		apps:   []providers.ExternalAppMeta{{ID: "parallel_app", Name: "Parallel App"}},
+	}
+	s.RegisterExternalProvider(mock)
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 5)
+
+	for range 5 {
+		wg.Go(func() {
+			req, _ := http.NewRequest(http.MethodGet, "/preview/app/screeny:parallel_app", nil)
+			req.SetPathValue("id", "screeny:parallel_app")
+			rr := httptest.NewRecorder()
+			s.handleAppThumbnail(rr, req)
+			if rr.Code != http.StatusOK {
+				errCh <- fmt.Errorf("unexpected status code: %d", rr.Code)
+			}
+			if !bytes.Equal(rr.Body.Bytes(), dummyChunkWebP1) {
+				errCh <- fmt.Errorf("unexpected body content")
+			}
+		})
+	}
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		assert.NoError(t, err)
+	}
+}

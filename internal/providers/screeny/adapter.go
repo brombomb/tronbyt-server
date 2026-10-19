@@ -26,7 +26,7 @@ import (
 const (
 	// DefaultTransitionSkipSec is the duration (in seconds) of the Screeny Studio crossfade between patches.
 	// Frames with patch timer < DefaultTransitionSkipSec are discarded to avoid blending artifacts.
-	DefaultTransitionSkipSec float32 = 2.05
+	DefaultTransitionSkipSec float32 = 2.10
 )
 
 // AdapterConfig holds configuration settings for the ScreenyAdapter.
