@@ -115,10 +115,18 @@ func TestScreenyAdapter_Lifecycle(t *testing.T) {
 	assert.Equal(t, "Split-Flap", apps[0].Name)
 	assert.Equal(t, "screeny", apps[0].Provider)
 
-	// 2. GetAppSchema
+	// 2. GetAppSchema (default includes scale_filter)
 	schemaBytes, err := adapter.GetAppSchema(ctx, "split_flap")
 	require.NoError(t, err)
 	assert.True(t, strings.Contains(string(schemaBytes), "Board Style"))
+	assert.True(t, strings.Contains(string(schemaBytes), "scale_filter"))
+
+	// GetAppSchema for 64x32 devices (Supports2xKey = false)
+	ctxNo2x := context.WithValue(ctx, providers.Supports2xKey, false)
+	schemaNo2x, err := adapter.GetAppSchema(ctxNo2x, "split_flap")
+	require.NoError(t, err)
+	assert.True(t, strings.Contains(string(schemaNo2x), "Board Style"))
+	assert.False(t, strings.Contains(string(schemaNo2x), "scale_filter"))
 
 	// 3. RenderAppChunks (128x64 with scale_filter parameter)
 	req := providers.RenderRequest{
@@ -168,7 +176,14 @@ func TestScreenyAdapter_DiscardsTransitionFrames(t *testing.T) {
 			}
 			defer func() { _ = conn.Close() }()
 
-			// 1. Send 5 transition frames (timer = 0.5s < 2.05s) with red pixels
+			// 1. Send transition frames (timer = 0.0s and 0.5s < 2.05s) with red pixels
+			redPacket0 := make([]byte, PreviewPacketLen)
+			binary.LittleEndian.PutUint32(redPacket0[4:8], math.Float32bits(0.0))
+			for p := range NPixels {
+				redPacket0[PreviewHeaderLen+p*3] = 255 // Red
+			}
+			_ = conn.WriteMessage(websocket.BinaryMessage, redPacket0)
+
 			redPacket := make([]byte, PreviewPacketLen)
 			binary.LittleEndian.PutUint32(redPacket[4:8], math.Float32bits(0.5))
 			for p := range NPixels {

@@ -40,7 +40,8 @@ func TestTranslatePatchParamsToPixletSchema(t *testing.T) {
 		},
 	}
 
-	schemaBytes, err := TranslatePatchParamsToPixletSchema(params)
+	// Test with includeScaleFilter = true (2x displays)
+	schemaBytes, err := TranslatePatchParamsToPixletSchema(params, true)
 	require.NoError(t, err)
 
 	var root PixletSchemaRoot
@@ -78,4 +79,18 @@ func TestTranslatePatchParamsToPixletSchema(t *testing.T) {
 	assert.Equal(t, "scale_filter", root.Schema[3].ID)
 	assert.Equal(t, "dropdown", root.Schema[3].Type)
 	assert.Equal(t, "default", root.Schema[3].Default)
+
+	// Test with includeScaleFilter = false (standard 64x32 displays)
+	schemaBytesNoScale, err := TranslatePatchParamsToPixletSchema(params, false)
+	require.NoError(t, err)
+
+	var rootNoScale PixletSchemaRoot
+	err = json.Unmarshal(schemaBytesNoScale, &rootNoScale)
+	require.NoError(t, err)
+
+	assert.Equal(t, "1", rootNoScale.Version)
+	require.Len(t, rootNoScale.Schema, 3)
+	for _, field := range rootNoScale.Schema {
+		assert.NotEqual(t, "scale_filter", field.ID)
+	}
 }

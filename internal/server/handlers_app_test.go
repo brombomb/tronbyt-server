@@ -1007,3 +1007,113 @@ func TestExternalAppUIntervalFallbackAndNonBlockingAdd(t *testing.T) {
 	s.backgroundRenders.Wait()
 }
 
+func TestExternalAppSchema_ConditionedOnDeviceType(t *testing.T) {
+	s := newTestServer(t)
+
+	user := data.User{Username: "testuser"}
+	s.DB.Create(&user)
+
+	device64x32 := data.Device{ID: "dev64", Username: "testuser", Type: data.DeviceTidbytGen1, APIKey: "key64"}
+	s.DB.Create(&device64x32)
+
+	device128x64 := data.Device{ID: "dev128", Username: "testuser", Type: data.DeviceRaspberryPiWide, APIKey: "key128"}
+	s.DB.Create(&device128x64)
+
+	extPath := "screeny:clock"
+	app64 := data.App{
+		DeviceID: device64x32.ID,
+		Iname:    "clock64",
+		Name:     "Clock",
+		Path:     &extPath,
+	}
+	s.DB.Create(&app64)
+
+	app128 := data.App{
+		DeviceID: device128x64.ID,
+		Iname:    "clock128",
+		Name:     "Clock",
+		Path:     &extPath,
+	}
+	s.DB.Create(&app128)
+
+	mock := &mockExternalProvider{
+		name: "screeny",
+		apps: []providers.ExternalAppMeta{{ID: "clock", Name: "Clock"}},
+	}
+	s.RegisterExternalProvider(mock)
+
+	// 1. 64x32 Device: schema must NOT contain scale_filter
+	req64, _ := http.NewRequest(http.MethodGet, "/devices/dev64/clock64/schema", nil)
+	ctx64 := context.WithValue(req64.Context(), userContextKey, &user)
+	ctx64 = context.WithValue(ctx64, deviceContextKey, &device64x32)
+	ctx64 = context.WithValue(ctx64, appContextKey, &app64)
+	req64 = req64.WithContext(ctx64)
+
+	rr64 := httptest.NewRecorder()
+	s.handleAppSchemaGet(rr64, req64)
+	assert.Equal(t, http.StatusOK, rr64.Code)
+	assert.Contains(t, rr64.Body.String(), "param1")
+	assert.NotContains(t, rr64.Body.String(), "scale_filter")
+
+	// 2. 128x64 Device (Supports2x): schema MUST contain scale_filter
+	req128, _ := http.NewRequest(http.MethodGet, "/devices/dev128/clock128/schema", nil)
+	ctx128 := context.WithValue(req128.Context(), userContextKey, &user)
+	ctx128 = context.WithValue(ctx128, deviceContextKey, &device128x64)
+	ctx128 = context.WithValue(ctx128, appContextKey, &app128)
+	req128 = req128.WithContext(ctx128)
+
+	rr128 := httptest.NewRecorder()
+	s.handleAppSchemaGet(rr128, req128)
+	assert.Equal(t, http.StatusOK, rr128.Code)
+	assert.Contains(t, rr128.Body.String(), "param1")
+	assert.Contains(t, rr128.Body.String(), "scale_filter")
+}
+
+func TestHandleCurrentApp_ETagAnd304(t *testing.T) {
+	s := newTestServer(t)
+
+	user := data.User{Username: "testuser"}
+	s.DB.Create(&user)
+	device := data.Device{ID: "testdevice", Username: "testuser"}
+	s.DB.Create(&device)
+
+	extPath := "screeny:testapp"
+	app := data.App{
+		DeviceID: device.ID,
+		Iname:    "testapp",
+		Name:     "Test App",
+		Path:     &extPath,
+	}
+	s.DB.Create(&app)
+
+	// Save a dummy chunk
+	chunks := []providers.RenderChunk{{WebPBytes: dummyChunkWebP1, DurationMs: 15000}}
+	require.NoError(t, s.saveAppChunks(device.ID, &app, chunks))
+
+	// Initial GET without ETag
+	req, _ := http.NewRequest(http.MethodGet, "/devices/testdevice/current", nil)
+	ctx := context.WithValue(req.Context(), userContextKey, &user)
+	ctx = context.WithValue(ctx, deviceContextKey, &device)
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	s.handleCurrentApp(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "image/webp", rr.Header().Get("Content-Type"))
+	etag := rr.Header().Get("ETag")
+	assert.NotEmpty(t, etag)
+
+	// Subsequent GET with matching If-None-Match should return 304 Not Modified
+	req2, _ := http.NewRequest(http.MethodGet, "/devices/testdevice/current", nil)
+	req2.Header.Set("If-None-Match", etag)
+	req2 = req2.WithContext(ctx)
+
+	rr2 := httptest.NewRecorder()
+	s.handleCurrentApp(rr2, req2)
+
+	assert.Equal(t, http.StatusNotModified, rr2.Code)
+	assert.Empty(t, rr2.Body.Bytes())
+}
+
+

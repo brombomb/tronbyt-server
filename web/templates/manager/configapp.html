@@ -807,19 +807,15 @@
     const autoRefresh = document.getElementById("autoRefreshPreview");
     if (autoRefresh && !autoRefresh.checked) return;
 
-    // Trigger backend preview (POST to update ephemeral, then GET with config param)
-    previewApp('{{ .Device.ID }}', '{{ .App.Iname }}', config, null, null)
-    .then(() => {
-         // Refresh image with cache busting AND pass current config as query param
-         if(previewImage) {
-             const currentSrc = previewImage.src.split('?')[0];
-             const encodedConfig = encodeURIComponent(JSON.stringify(config));
-             previewImage.src = `${currentSrc}?config=${encodedConfig}&t=${new Date().getTime()}`;
-             // Note: The 'load' event listener below will handle hiding the skeleton
-             // when the new image is actually loaded.
-             previewImage.classList.remove('loaded'); // Reset to show skeleton during load
-         }
-    });
+    // Refresh web preview image with cache busting AND pass current config as query param
+    if(previewImage) {
+        const currentSrc = previewImage.src.split('?')[0];
+        const encodedConfig = encodeURIComponent(JSON.stringify(config));
+        previewImage.src = `${currentSrc}?config=${encodedConfig}&t=${new Date().getTime()}`;
+        // Note: The 'load' event listener below will handle hiding the skeleton
+        // when the new image is actually loaded.
+        previewImage.classList.remove('loaded'); // Reset to show skeleton during load
+    }
   }, 500);
 
   // Centralized config update handler

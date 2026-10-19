@@ -50,7 +50,16 @@ func (m *mockExternalProvider) ListApps(ctx context.Context) ([]providers.Extern
 	return m.apps, nil
 }
 func (m *mockExternalProvider) GetAppSchema(ctx context.Context, appID string) ([]byte, error) {
-	return []byte("{}"), nil
+	includeScaleFilter := true
+	if v := ctx.Value(providers.Supports2xKey); v != nil {
+		if b, ok := v.(bool); ok {
+			includeScaleFilter = b
+		}
+	}
+	if includeScaleFilter {
+		return []byte(`{"version":"1","schema":[{"id":"param1"},{"id":"scale_filter"}]}`), nil
+	}
+	return []byte(`{"version":"1","schema":[{"id":"param1"}]}`), nil
 }
 func (m *mockExternalProvider) RenderAppChunks(ctx context.Context, req providers.RenderRequest) ([]providers.RenderChunk, error) {
 	return m.chunks, nil

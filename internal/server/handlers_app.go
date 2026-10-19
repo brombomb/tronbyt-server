@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -476,7 +477,8 @@ func (s *Server) handleConfigAppGet(w http.ResponseWriter, r *http.Request) {
 	if app.Path != nil && *app.Path != "" {
 		if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
 			var err error
-			schemaBytes, err = provider.GetAppSchema(r.Context(), appID)
+			ctx := context.WithValue(r.Context(), providers.Supports2xKey, device.Type.Supports2x())
+			schemaBytes, err = provider.GetAppSchema(ctx, appID)
 			if err != nil {
 				slog.Error("Failed to get external app schema", "provider", provider.Name(), "appID", appID, "error", err)
 			}
@@ -536,7 +538,8 @@ func (s *Server) handleAppSchemaGet(w http.ResponseWriter, r *http.Request) {
 	schemaBytes := []byte("{}")
 	if app.Path != nil && *app.Path != "" {
 		if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
-			b, err := provider.GetAppSchema(r.Context(), appID)
+			ctx := context.WithValue(r.Context(), providers.Supports2xKey, device.Type.Supports2x())
+			b, err := provider.GetAppSchema(ctx, appID)
 			if err != nil {
 				slog.Error("Failed to get external app schema", "provider", provider.Name(), "appID", appID, "error", err)
 				http.Error(w, "Failed to load schema", http.StatusBadGateway)
@@ -710,6 +713,7 @@ func (s *Server) handleConfigAppPost(w http.ResponseWriter, r *http.Request) {
 
 	// Notify Dashboard & Device
 	s.notifyDashboard(user.Username, WSEvent{Type: "apps_changed", DeviceID: device.ID})
+	s.notifyDashboard(user.Username, WSEvent{Type: "image_updated", DeviceID: device.ID})
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -774,8 +778,16 @@ func (s *Server) handleCurrentApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "image/webp")
+	h := sha256.Sum256(imgData)
+	etag := fmt.Sprintf("\"%x\"", h[:16])
+	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "no-cache")
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/webp")
 	if _, err := w.Write(imgData); err != nil {
 		slog.Error("Failed to write current app image", "error", err)
 	}
@@ -829,6 +841,10 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 
 		if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
 			width, height := device.Type.CanvasSize()
+			if device.Type.Supports2x() {
+				width *= 2
+				height *= 2
+			}
 			fps := s.Config.ScreenyFPS
 			if fps <= 0 {
 				fps = 30
@@ -907,6 +923,10 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 
 			// Third, render on-demand with saved app.Config
 			width, height := device.Type.CanvasSize()
+			if device.Type.Supports2x() {
+				width *= 2
+				height *= 2
+			}
 			fps := s.Config.ScreenyFPS
 			if fps <= 0 {
 				fps = 30

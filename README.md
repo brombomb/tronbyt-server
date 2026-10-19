@@ -130,7 +130,7 @@ Tronbyt Server supports pluggable external app providers via the `ExternalAppPro
      - **Scale2x / EPX (AdvMAME2x):** Pattern-matches diagonal pixel transitions to smooth angles without blur, keeping exact palette colors razor-sharp—ideal for clocks, split-flap airport boards, dials, and retro pixel art.
      - **Bilinear:** Smooth 4-way subpixel color interpolation.
      - **Nearest:** Classic retro 2x2 LED block doubling.
-   - Users can select their preferred filter globally via `SCREENY_SCALE_FILTER` or override it per app instance in the Tronbyt web UI app settings.
+   - Users can select their preferred filter globally via `SCREENY_SCALE_FILTER` or override it per app instance in the Tronbyt web UI app settings (automatically offered for devices that support 2x scaling, such as Tronberry / Raspberry Pi 128x64).
 4. **Multi-Chunk WebP Streaming:**
    - For high-capacity clients (Raspberry Pi / `tronberry`), animations up to 5 MB (configurable via `SCREENY_MAX_WEBP_BYTES_RPI`) stream in a single high-fidelity chunk.
    - For memory-constrained clients (ESP32 / Tidbyt), animations exceeding 460 KB (`SCREENY_MAX_WEBP_BYTES_ESP`) are seamlessly split into sequential chunks with exact playback durations.

@@ -175,7 +175,14 @@ func (a *ScreenyAdapter) GetAppSchema(ctx context.Context, appID string) ([]byte
 		return nil, fmt.Errorf("patch %q not found in screeny-studio", appID)
 	}
 
-	return TranslatePatchParamsToPixletSchema(patch.Params)
+	includeScaleFilter := true
+	if v := ctx.Value(providers.Supports2xKey); v != nil {
+		if b, ok := v.(bool); ok {
+			includeScaleFilter = b
+		}
+	}
+
+	return TranslatePatchParamsToPixletSchema(patch.Params, includeScaleFilter)
 }
 
 // RenderAppChunks renders a Screeny patch at 30 FPS for the requested duration,
@@ -398,7 +405,7 @@ func (a *ScreenyAdapter) captureFrames(ctx context.Context, fps, durationMs, tar
 		// we discard these transition frames so previews and animations are crisp and uncorrupted.
 		if len(msgData) == PreviewPacketLen && a.transitionSkipSec > 0 {
 			timer := math.Float32frombits(binary.LittleEndian.Uint32(msgData[4:8]))
-			if timer > 0 && timer < a.transitionSkipSec {
+			if timer < a.transitionSkipSec {
 				continue
 			}
 		}

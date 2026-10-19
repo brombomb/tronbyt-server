@@ -115,7 +115,15 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 	if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
 		appKey := fmt.Sprintf("%s:%s", device.ID, app.Iname)
 		s.inFlightRendersMu.Lock()
+		if s.renderPending == nil {
+			s.renderPending = make(map[string]bool)
+		}
+
+		forceRender := s.filtersChangedSinceLastRender(device, app) || app.LastRender.IsZero()
 		if s.inFlightRenders[appKey] {
+			if forceRender {
+				s.renderPending[appKey] = true
+			}
 			s.inFlightRendersMu.Unlock()
 			slog.Debug("Render already in flight for external app, skipping redundant trigger", "app", appBasename)
 			return true
@@ -125,11 +133,23 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 		defer func() {
 			s.inFlightRendersMu.Lock()
 			delete(s.inFlightRenders, appKey)
+			isPending := s.renderPending[appKey]
+			delete(s.renderPending, appKey)
 			s.inFlightRendersMu.Unlock()
+
+			if isPending {
+				s.backgroundRenders.Go(func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					var latestApp data.App
+					if err := s.DB.Where("id = ?", app.ID).First(&latestApp).Error; err == nil {
+						s.possiblyRender(ctx, &latestApp, device, user)
+					}
+				})
+			}
 		}()
 
 		now := time.Now()
-		forceRender := s.filtersChangedSinceLastRender(device, app)
 		uinterval := app.UInterval
 		if uinterval <= 0 {
 			uinterval = 10
@@ -226,6 +246,9 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 
 			if app.AutoPin {
 				s.handleAutoPin(ctx, app, device, user, true)
+			}
+			if user != nil && device != nil {
+				s.notifyDashboard(user.Username, WSEvent{Type: "image_updated", DeviceID: device.ID})
 			}
 			return true
 		}

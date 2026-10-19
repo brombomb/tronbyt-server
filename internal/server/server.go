@@ -73,6 +73,7 @@ type Server struct {
 	deviceCurrentChunkApp map[string]string
 	deviceChunkMu         sync.Mutex
 	inFlightRenders       map[string]bool
+	renderPending         map[string]bool
 	inFlightRendersMu     sync.Mutex
 
 	// SchemaCache, when set, allows forcing a one-shot refetch of an app's
@@ -135,6 +136,7 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 		deviceChunkIndices:    make(map[string]int),
 		deviceCurrentChunkApp: make(map[string]string),
 		inFlightRenders:       make(map[string]bool),
+		renderPending:         make(map[string]bool),
 	}
 
 	// Load Settings from DB

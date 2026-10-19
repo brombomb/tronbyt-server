@@ -4,6 +4,11 @@ import (
 	"context"
 )
 
+type contextKey string
+
+// Supports2xKey is the context key for passing 2x display support capability to providers.
+const Supports2xKey contextKey = "supports2x"
+
 // RenderChunk represents a single WebP chunk and its exact playback duration.
 type RenderChunk struct {
 	WebPBytes  []byte

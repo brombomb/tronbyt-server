@@ -59,9 +59,10 @@ type PixletSchemaRoot struct {
 }
 
 // TranslatePatchParamsToPixletSchema converts a list of Screeny Studio parameters into
-// a Pixlet-compatible JSON schema string.
-func TranslatePatchParamsToPixletSchema(params []StudioParam) ([]byte, error) {
-	fields := make([]PixletSchemaField, 0, len(params))
+// a Pixlet-compatible JSON schema string. When includeScaleFilter is true, a 128x64 upscaling
+// filter dropdown is included (only for devices that support 2x / 128x64 scaling).
+func TranslatePatchParamsToPixletSchema(params []StudioParam, includeScaleFilter bool) ([]byte, error) {
+	fields := make([]PixletSchemaField, 0, len(params)+1)
 
 	for _, p := range params {
 		field := PixletSchemaField{
@@ -110,21 +111,23 @@ func TranslatePatchParamsToPixletSchema(params []StudioParam) ([]byte, error) {
 	}
 
 	// Add 128x64 upscaling filter option for 2x displays (e.g. Tronberry).
-	fields = append(fields, PixletSchemaField{
-		ID:          "scale_filter",
-		Name:        "128x64 Upscaling Filter",
-		Description: "Upscaling algorithm when displaying on 128x64 panels (like Tronberry)",
-		Icon:        "expand",
-		Type:        "dropdown",
-		Default:     "default",
-		Options: []PixletDropdownOption{
-			{Value: "default", Display: "Server Default"},
-			{Value: FilterBicubic, Display: "Bicubic (Smooth 128x64 Gradients & 3D Shaders)"},
-			{Value: FilterScale2x, Display: "Scale2x / EPX (Sharp 128x64 Pixel Art & Clocks)"},
-			{Value: FilterBilinear, Display: "Bilinear (Soft)"},
-			{Value: FilterNearest, Display: "Nearest (Retro 2x2 Blocks)"},
-		},
-	})
+	if includeScaleFilter {
+		fields = append(fields, PixletSchemaField{
+			ID:          "scale_filter",
+			Name:        "128x64 Upscaling Filter",
+			Description: "Upscaling algorithm when displaying on 128x64 panels (like Tronberry)",
+			Icon:        "expand",
+			Type:        "dropdown",
+			Default:     "default",
+			Options: []PixletDropdownOption{
+				{Value: "default", Display: "Server Default"},
+				{Value: FilterBicubic, Display: "Bicubic (Smooth 128x64 Gradients & 3D Shaders)"},
+				{Value: FilterScale2x, Display: "Scale2x / EPX (Sharp 128x64 Pixel Art & Clocks)"},
+				{Value: FilterBilinear, Display: "Bilinear (Soft)"},
+				{Value: FilterNearest, Display: "Nearest (Retro 2x2 Blocks)"},
+			},
+		})
+	}
 
 	root := PixletSchemaRoot{
 		Version: "1",
