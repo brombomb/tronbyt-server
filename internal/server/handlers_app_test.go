@@ -16,6 +16,7 @@ import (
 
 	"tronbyt-server/internal/apps"
 	"tronbyt-server/internal/data"
+	"tronbyt-server/internal/providers"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -759,4 +760,173 @@ published: "2026-01-01"
 	require.NoError(t, yaml.Unmarshal(raw, &cleared))
 	assert.Equal(t, false, cleared["broken"])
 	assert.Equal(t, "", cleared["brokenReason"])
+}
+
+func TestExternalAppThumbnail_OnDemandAndCached(t *testing.T) {
+	s := newTestServer(t)
+
+	chunks := []providers.RenderChunk{
+		{WebPBytes: dummyChunkWebP1, DurationMs: 1000},
+	}
+	mock := &mockExternalProvider{
+		name:   "screeny",
+		chunks: chunks,
+		apps: []providers.ExternalAppMeta{
+			{ID: "clock_test", Name: "Clock Test"},
+		},
+	}
+	s.RegisterExternalProvider(mock)
+
+	// 1. Initial request - renders preview on demand and writes cache
+	req, _ := http.NewRequest(http.MethodGet, "/preview/app/screeny:clock_test", nil)
+	req.SetPathValue("id", "screeny:clock_test")
+	rr := httptest.NewRecorder()
+
+	s.handleAppThumbnail(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "image/webp", rr.Header().Get("Content-Type"))
+	assert.Equal(t, dummyChunkWebP1, rr.Body.Bytes())
+
+	// Verify disk cache exists
+	cachePath := filepath.Join(s.DataDir, "cache", "previews", "screeny", "clock_test.webp")
+	cachedBytes, err := os.ReadFile(cachePath)
+	require.NoError(t, err)
+	assert.Equal(t, dummyChunkWebP1, cachedBytes)
+
+	// 2. Second request - serves directly from disk cache
+	rr2 := httptest.NewRecorder()
+	s.handleAppThumbnail(rr2, req)
+	assert.Equal(t, http.StatusOK, rr2.Code)
+	assert.Equal(t, dummyChunkWebP1, rr2.Body.Bytes())
+}
+
+func TestExternalAppConfigPreview_WithAndWithoutConfig(t *testing.T) {
+	s := newTestServer(t)
+
+	user := data.User{Username: "testuser"}
+	s.DB.Create(&user)
+	device := data.Device{ID: "testdevice", Username: "testuser"}
+	s.DB.Create(&device)
+
+	extPath := "screeny:clock_test"
+	app := data.App{
+		DeviceID: device.ID,
+		Iname:    "testapp",
+		Name:     "Clock Test",
+		Path:     &extPath,
+	}
+	s.DB.Create(&app)
+
+	chunks := []providers.RenderChunk{
+		{WebPBytes: dummyChunkWebP1, DurationMs: 1500},
+	}
+	mock := &mockExternalProvider{
+		name:   "screeny",
+		chunks: chunks,
+		apps: []providers.ExternalAppMeta{
+			{ID: "clock_test", Name: "Clock Test"},
+		},
+	}
+	s.RegisterExternalProvider(mock)
+
+	// 1. Config preview without config query param
+	req, _ := http.NewRequest(http.MethodGet, "/devices/testdevice/installations/testapp/preview", nil)
+	ctx := context.WithValue(req.Context(), userContextKey, &user)
+	ctx = context.WithValue(ctx, deviceContextKey, &device)
+	ctx = context.WithValue(ctx, appContextKey, &app)
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	s.handleRenderConfigPreview(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "image/webp", rr.Header().Get("Content-Type"))
+	assert.Equal(t, dummyChunkWebP1, rr.Body.Bytes())
+
+	// 2. Config preview with config query param
+	req2, _ := http.NewRequest(http.MethodGet, "/devices/testdevice/installations/testapp/preview?config=%7B%22speed%22%3A5%7D", nil)
+	req2 = req2.WithContext(ctx)
+
+	rr2 := httptest.NewRecorder()
+	s.handleRenderConfigPreview(rr2, req2)
+
+	assert.Equal(t, http.StatusOK, rr2.Code)
+	assert.Equal(t, "image/webp", rr2.Header().Get("Content-Type"))
+	assert.Equal(t, dummyChunkWebP1, rr2.Body.Bytes())
+}
+
+func TestExternalAppPushPreview(t *testing.T) {
+	s := newTestServer(t)
+
+	user := data.User{Username: "testuser"}
+	s.DB.Create(&user)
+	device := data.Device{ID: "testdevice", Username: "testuser"}
+	s.DB.Create(&device)
+
+	extPath := "screeny:clock_test"
+	app := data.App{
+		DeviceID: device.ID,
+		Iname:    "testapp",
+		Name:     "Clock Test",
+		Path:     &extPath,
+	}
+	s.DB.Create(&app)
+
+	chunks := []providers.RenderChunk{
+		{WebPBytes: dummyChunkWebP1, DurationMs: 10000},
+	}
+	mock := &mockExternalProvider{
+		name:   "screeny",
+		chunks: chunks,
+	}
+	s.RegisterExternalProvider(mock)
+
+	req, _ := http.NewRequest(http.MethodPost, "/devices/testdevice/testapp/preview", strings.NewReader(`{"test":1}`))
+	ctx := context.WithValue(req.Context(), userContextKey, &user)
+	ctx = context.WithValue(ctx, deviceContextKey, &device)
+	ctx = context.WithValue(ctx, appContextKey, &app)
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	s.handlePushPreview(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+
+	// Verify pushed image was saved
+	webpDir, err := s.ensureDeviceImageDir(device.ID)
+	require.NoError(t, err)
+	pushedFile := filepath.Join(webpDir, "pushed", app.Iname+".webp")
+	b, err := os.ReadFile(pushedFile)
+	require.NoError(t, err)
+	assert.Equal(t, dummyChunkWebP1, b)
+}
+
+func TestExternalAppGetMetadata(t *testing.T) {
+	s := newTestServer(t)
+
+	mock := &mockExternalProvider{
+		name: "screeny",
+		apps: []providers.ExternalAppMeta{
+			{
+				ID:      "clocks-minimal",
+				Name:    "Minimal Clock",
+				Summary: "A clean minimalist clock",
+				Desc:    "Detailed clock description",
+				Author:  "TestAuthor",
+				Tags:    []string{"clock", "minimal"},
+			},
+		},
+	}
+	s.RegisterExternalProvider(mock)
+
+	meta := s.getAppMetadata("screeny:clocks-minimal")
+	require.NotNil(t, meta)
+	assert.Equal(t, "screeny:clocks-minimal", meta.ID)
+	assert.Equal(t, "[Screeny] Minimal Clock", meta.Name)
+	assert.Equal(t, "A clean minimalist clock", meta.Summary)
+	assert.Equal(t, "Detailed clock description", meta.Desc)
+	assert.Equal(t, "TestAuthor", meta.Author)
+	assert.Equal(t, "Clocks", meta.Category)
+	assert.Equal(t, "screeny", meta.Provider)
 }

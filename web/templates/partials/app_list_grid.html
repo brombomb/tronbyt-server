@@ -30,6 +30,19 @@
                 </select>
             </span>
         </label>
+        {{ if and .Providers (gt (len .Providers) 1) }}
+        <label for="provider_{{ .SearchID }}" class="control-label">
+            {{ t .Localizer "Provider:" }}
+            <span class="select-wrap">
+                <select id="provider_{{ .SearchID }}" onchange="filterByProvider()">
+                    <option value="">{{ t .Localizer "All Providers" }}</option>
+                    {{ range .Providers }}
+                    <option value="{{ . | lower }}">{{ . }}</option>
+                    {{ end }}
+                </select>
+            </span>
+        </label>
+        {{ end }}
         <label class="control-label">
             <input type="checkbox"
                    id="hide_installed_{{ .SearchID }}"
@@ -78,6 +91,7 @@
      data-broken="{{ .App.Broken }}"
      data-author="{{ .App.Author }}"
      data-category="{{ .App.Category }}"
+     data-provider="{{ if .App.Provider }}{{ .App.Provider | lower }}{{ else }}tronbyt{{ end }}"
      data-published="{{ .App.Published }}"
      data-updated="{{ .App.Updated }}"
      data-installs="{{ with .App.InstallCount }}{{ . }}{{ end }}"
@@ -89,7 +103,7 @@
     <div class="supports-2x-badge">2x</div>
     {{ end }}
     {{ if .App.Supports64x64 }}
-    <div class="supports-64x64-badge">64&times;64</div>
+    <div class="supports-64x64-badge">64×64</div>
     {{ end }}
     <!-- Skeleton loader for images -->
     <div class="app-img">

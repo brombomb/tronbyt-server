@@ -587,6 +587,10 @@ function filterByCategory() {
   applyFilters();
 }
 
+function filterByProvider() {
+  applyFilters();
+}
+
 function sortApps(searchId) {
   sortType = document.getElementById('sort_' + searchId).value;
   try {
@@ -700,6 +704,9 @@ function applyFilters() {
         const categorySelect = document.getElementById('category_' + searchId);
         const currentCategory = categorySelect ? categorySelect.value : '';
 
+        const providerSelect = document.getElementById('provider_' + searchId);
+        const currentProvider = providerSelect ? providerSelect.value.toLowerCase().trim() : '';
+
         // Get all app items from the grid
         const allItems = Array.from(grid.getElementsByClassName('app-item'));
 
@@ -712,6 +719,7 @@ function applyFilters() {
           const summary = (item.querySelector('p')?.textContent || '').toLowerCase();
           const tags = (item.getAttribute('data-tags') || '').toLowerCase().split(',');
           const category = (item.getAttribute('data-category') || '').toLowerCase();
+          const provider = (item.getAttribute('data-provider') || 'tronbyt').toLowerCase();
 
           // Apply search filter (search name, summary, tags, and author if search begins with @)
           if (currentSearchFilter) {
@@ -728,6 +736,11 @@ function applyFilters() {
 
           // Apply category filter
           if (currentCategory && category !== currentCategory) {
+            return false;
+          }
+
+          // Apply provider filter
+          if (currentProvider && provider !== currentProvider) {
             return false;
           }
 

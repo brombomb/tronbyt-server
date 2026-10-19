@@ -41,12 +41,13 @@ var dummyChunkWebP3 = []byte{
 
 type mockExternalProvider struct {
 	name   string
+	apps   []providers.ExternalAppMeta
 	chunks []providers.RenderChunk
 }
 
 func (m *mockExternalProvider) Name() string { return m.name }
 func (m *mockExternalProvider) ListApps(ctx context.Context) ([]providers.ExternalAppMeta, error) {
-	return nil, nil
+	return m.apps, nil
 }
 func (m *mockExternalProvider) GetAppSchema(ctx context.Context, appID string) ([]byte, error) {
 	return []byte("{}"), nil

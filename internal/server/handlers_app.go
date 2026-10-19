@@ -25,6 +25,7 @@ import (
 	"tronbyt-server/internal/config"
 	"tronbyt-server/internal/data"
 	"tronbyt-server/internal/gitutils"
+	"tronbyt-server/internal/providers"
 	"tronbyt-server/internal/renderer"
 
 	securejoin "github.com/cyphar/filepath-securejoin"
@@ -74,14 +75,24 @@ func (s *Server) handleAddAppGet(w http.ResponseWriter, r *http.Request) {
 	customApps := apps.ListUserApps(s.DataDir, user.Username)
 
 	// External Provider Apps (e.g. Screeny)
+	titleCaser := cases.Title(language.English)
+	providerNames := []string{"Tronbyt"}
+
 	for _, provider := range s.ListExternalProviders() {
 		extApps, err := provider.ListApps(r.Context())
 		if err != nil {
 			slog.Warn("Failed to list external apps", "provider", provider.Name(), "error", err)
 			continue
 		}
-		titleCaser := cases.Title(language.English)
+		if len(extApps) > 0 {
+			providerNames = append(providerNames, titleCaser.String(provider.Name()))
+			go s.prewarmExternalPreviews(provider, extApps)
+		}
 		for _, ext := range extApps {
+			category := "Visuals"
+			if strings.HasPrefix(ext.ID, "clocks") {
+				category = "Clocks"
+			}
 			manifest := apps.Manifest{
 				ID:          fmt.Sprintf("%s:%s", provider.Name(), ext.ID),
 				Name:        fmt.Sprintf("[%s] %s", titleCaser.String(provider.Name()), ext.Name),
@@ -91,8 +102,9 @@ func (s *Server) handleAddAppGet(w http.ResponseWriter, r *http.Request) {
 				FileName:    ext.ID,
 				PackageName: ext.ID,
 				Supports2x:  ext.Supports2x,
-				Category:    titleCaser.String(provider.Name()),
+				Category:    category,
 				Tags:        ext.Tags,
+				Provider:    provider.Name(),
 			}
 			appMeta := apps.AppMetadata{
 				Manifest: manifest,
@@ -100,6 +112,11 @@ func (s *Server) handleAddAppGet(w http.ResponseWriter, r *http.Request) {
 			}
 			systemApps = append(systemApps, appMeta)
 		}
+	}
+
+	var availableProviders []string
+	if len(providerNames) > 1 {
+		availableProviders = providerNames
 	}
 
 	s.markInstalledApps(device, systemApps, customApps)
@@ -120,6 +137,7 @@ func (s *Server) handleAddAppGet(w http.ResponseWriter, r *http.Request) {
 		Device:         device,
 		SystemApps:     systemApps,
 		CustomApps:     customApps,
+		Providers:      availableProviders,
 		SystemRepoInfo: systemRepoInfo,
 		Config:         &config.TemplateConfig{Production: s.Config.Production},
 	})
@@ -313,6 +331,12 @@ func (s *Server) handleAppThumbnail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// External Provider Thumbnail (e.g. "screeny:clocks-numerals")
+	if provider, appID, ok := s.parseExternalAppPath(id); ok {
+		s.serveExternalAppThumbnail(w, r, provider, appID)
+		return
+	}
+
 	user, _ := UserFromContext(r.Context())
 
 	var appMeta *apps.AppMetadata
@@ -378,6 +402,70 @@ func (s *Server) handleAppThumbnail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.ServeFile(w, r, path)
+}
+
+func (s *Server) serveExternalAppThumbnail(w http.ResponseWriter, r *http.Request, provider providers.ExternalAppProvider, appID string) {
+	cacheDir := filepath.Join(s.DataDir, "cache", "previews", provider.Name())
+	cacheFile := filepath.Join(cacheDir, appID+".webp")
+
+	// 1. Serve from disk cache if available
+	if _, err := os.Stat(cacheFile); err == nil {
+		w.Header().Set("Content-Type", "image/webp")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		http.ServeFile(w, r, cacheFile)
+		return
+	}
+
+	// 2. Render 1.0s preview chunk on demand
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+
+	req := providers.RenderRequest{
+		AppID:        appID,
+		Width:        64,
+		Height:       32,
+		FPS:          15,
+		DurationMs:   1000,
+		MaxChunkSize: 524288,
+	}
+
+	chunks, err := provider.RenderAppChunks(ctx, req)
+	if err == nil && len(chunks) > 0 && len(chunks[0].WebPBytes) > 0 {
+		_ = os.MkdirAll(cacheDir, 0755)
+		_ = os.WriteFile(cacheFile, chunks[0].WebPBytes, 0644)
+		w.Header().Set("Content-Type", "image/webp")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(chunks[0].WebPBytes)
+		return
+	}
+
+	slog.Warn("Failed to render external app thumbnail", "provider", provider.Name(), "app", appID, "error", err)
+	http.NotFound(w, r)
+}
+
+func (s *Server) prewarmExternalPreviews(provider providers.ExternalAppProvider, extApps []providers.ExternalAppMeta) {
+	cacheDir := filepath.Join(s.DataDir, "cache", "previews", provider.Name())
+	for _, ext := range extApps {
+		cacheFile := filepath.Join(cacheDir, ext.ID+".webp")
+		if _, err := os.Stat(cacheFile); err == nil {
+			continue // already cached
+		}
+		req := providers.RenderRequest{
+			AppID:        ext.ID,
+			Width:        64,
+			Height:       32,
+			FPS:          15,
+			DurationMs:   1000,
+			MaxChunkSize: 524288,
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		chunks, err := provider.RenderAppChunks(ctx, req)
+		cancel()
+		if err == nil && len(chunks) > 0 && len(chunks[0].WebPBytes) > 0 {
+			_ = os.MkdirAll(cacheDir, 0755)
+			_ = os.WriteFile(cacheFile, chunks[0].WebPBytes, 0644)
+		}
+	}
 }
 
 func (s *Server) handleConfigAppGet(w http.ResponseWriter, r *http.Request) {
@@ -742,6 +830,42 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "App path not set", http.StatusBadRequest)
 			return
 		}
+
+		if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
+			width, height := device.Type.CanvasSize()
+			fps := s.Config.ScreenyFPS
+			if fps <= 0 {
+				fps = 30
+			}
+			maxChunkSize := s.GetMaxChunkSizeForDevice(device)
+			req := providers.RenderRequest{
+				AppID:        appID,
+				Width:        width,
+				Height:       height,
+				FPS:          fps,
+				DurationMs:   1500,
+				MaxChunkSize: maxChunkSize,
+				Timezone:     device.GetTimezone(),
+				Config:       configData,
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			defer cancel()
+
+			chunks, err := provider.RenderAppChunks(ctx, req)
+			if err != nil || len(chunks) == 0 {
+				slog.Error("Preview render failed for external app", "provider", provider.Name(), "app", appID, "error", err)
+				http.Error(w, "Render failed", http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "image/webp")
+			w.Header().Set("Cache-Control", "no-cache")
+			if _, err := w.Write(chunks[0].WebPBytes); err != nil {
+				slog.Error("Failed to write image bytes for render config preview", "error", err)
+			}
+			return
+		}
+
 		appPath, err := securejoin.SecureJoin(s.DataDir, *app.Path)
 		if err != nil {
 			slog.Error("Failed to resolve app path", "path", *app.Path, "error", err)
@@ -761,6 +885,58 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 		if _, err := w.Write(imgBytes); err != nil {
 			slog.Error("Failed to write image bytes for render config preview", "error", err)
 		}
+		return
+	}
+
+	if app.Path != nil && s.isExternalAppPath(*app.Path) {
+		provider, appID, ok := s.parseExternalAppPath(*app.Path)
+		if ok {
+			// First check if app already has rendered chunks
+			if existing := s.getAppChunks(device.ID, app); len(existing) > 0 && len(existing[0].WebPBytes) > 0 {
+				w.Header().Set("Content-Type", "image/webp")
+				w.Header().Set("Cache-Control", "no-cache")
+				_, _ = w.Write(existing[0].WebPBytes)
+				return
+			}
+
+			// Second check if we have a thumbnail cached on disk
+			cacheDir := filepath.Join(s.DataDir, "cache", "previews", provider.Name())
+			cacheFile := filepath.Join(cacheDir, appID+".webp")
+			if b, err := os.ReadFile(cacheFile); err == nil && len(b) > 0 {
+				w.Header().Set("Content-Type", "image/webp")
+				w.Header().Set("Cache-Control", "no-cache")
+				_, _ = w.Write(b)
+				return
+			}
+
+			// Third, render on-demand with saved app.Config
+			width, height := device.Type.CanvasSize()
+			fps := s.Config.ScreenyFPS
+			if fps <= 0 {
+				fps = 30
+			}
+			maxChunkSize := s.GetMaxChunkSizeForDevice(device)
+			req := providers.RenderRequest{
+				AppID:        appID,
+				Width:        width,
+				Height:       height,
+				FPS:          fps,
+				DurationMs:   1500,
+				MaxChunkSize: maxChunkSize,
+				Timezone:     device.GetTimezone(),
+				Config:       app.Config,
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			defer cancel()
+			chunks, err := provider.RenderAppChunks(ctx, req)
+			if err == nil && len(chunks) > 0 && len(chunks[0].WebPBytes) > 0 {
+				w.Header().Set("Content-Type", "image/webp")
+				w.Header().Set("Cache-Control", "no-cache")
+				_, _ = w.Write(chunks[0].WebPBytes)
+				return
+			}
+		}
+		s.sendDefaultImage(w, r, device)
 		return
 	}
 
@@ -847,6 +1023,47 @@ func (s *Server) handlePushPreview(w http.ResponseWriter, r *http.Request) {
 	// Render
 	if app.Path == nil || *app.Path == "" {
 		http.Error(w, "App path not set", http.StatusBadRequest)
+		return
+	}
+
+	if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
+		width, height := device.Type.CanvasSize()
+		fps := s.Config.ScreenyFPS
+		if fps <= 0 {
+			fps = 30
+		}
+		maxChunkSize := s.GetMaxChunkSizeForDevice(device)
+		previewConfig := app.Config
+		if configBody != nil {
+			previewConfig = configBody
+		}
+		dwellSecs := 15
+		if device != nil {
+			dwellSecs = device.GetEffectiveDwellTime(app)
+		}
+		req := providers.RenderRequest{
+			AppID:        appID,
+			Width:        width,
+			Height:       height,
+			FPS:          fps,
+			DurationMs:   dwellSecs * 1000,
+			MaxChunkSize: maxChunkSize,
+			Timezone:     device.GetTimezone(),
+			Config:       previewConfig,
+		}
+		chunks, err := provider.RenderAppChunks(r.Context(), req)
+		if err != nil || len(chunks) == 0 {
+			slog.Error("Preview render failed for external app", "provider", provider.Name(), "app", appID, "error", err)
+			http.Error(w, "Render failed", http.StatusInternalServerError)
+			return
+		}
+		imgBytes := chunks[0].WebPBytes
+		if err := s.savePushedImage(device.ID, app.Iname, "", imgBytes); err != nil {
+			http.Error(w, "Failed to push preview", http.StatusInternalServerError)
+			return
+		}
+		s.Broadcaster.Notify(device.ID, imgBytes)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 	appPath, err := securejoin.SecureJoin(s.DataDir, *app.Path)
