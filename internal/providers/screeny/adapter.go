@@ -3,12 +3,14 @@ package screeny
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -21,25 +23,33 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	// DefaultTransitionSkipSec is the duration (in seconds) of the Screeny Studio crossfade between patches.
+	// Frames with patch timer < DefaultTransitionSkipSec are discarded to avoid blending artifacts.
+	DefaultTransitionSkipSec float32 = 2.05
+)
+
 // AdapterConfig holds configuration settings for the ScreenyAdapter.
 type AdapterConfig struct {
-	StudioURL    string
-	FPS          int
-	MaxWebPBytes int
-	ScaleFilter  string
-	HTTPClient   *http.Client
-	WSUpgrader   *websocket.Dialer
+	StudioURL         string
+	FPS               int
+	MaxWebPBytes      int
+	ScaleFilter       string
+	TransitionSkipSec float32
+	HTTPClient        *http.Client
+	WSUpgrader        *websocket.Dialer
 }
 
 // ScreenyAdapter implements the providers.ExternalAppProvider interface for gotwalt/screeny.
 type ScreenyAdapter struct {
-	sem          chan struct{}
-	studioURL    string
-	fps          int
-	maxWebPBytes int
-	scaleFilter  string
-	httpClient   *http.Client
-	wsDialer     *websocket.Dialer
+	sem               chan struct{}
+	studioURL         string
+	fps               int
+	maxWebPBytes      int
+	scaleFilter       string
+	transitionSkipSec float32
+	httpClient        *http.Client
+	wsDialer          *websocket.Dialer
 
 	// Cached bootstrap data to avoid re-querying on every schema request.
 	cacheMu     sync.RWMutex
@@ -80,15 +90,23 @@ func NewAdapter(cfg AdapterConfig) *ScreenyAdapter {
 		}
 	}
 
+	transitionSkipSec := cfg.TransitionSkipSec
+	if transitionSkipSec == 0 {
+		transitionSkipSec = DefaultTransitionSkipSec
+	} else if transitionSkipSec < 0 {
+		transitionSkipSec = 0 // explicitly disabled
+	}
+
 	return &ScreenyAdapter{
-		sem:          make(chan struct{}, 1),
-		studioURL:    studioURL,
-		fps:          fps,
-		maxWebPBytes: maxBytes,
-		scaleFilter:  scaleFilter,
-		httpClient:   httpClient,
-		wsDialer:     wsDialer,
-		cachedPatch:  make(map[string]StudioPatch),
+		sem:               make(chan struct{}, 1),
+		studioURL:         studioURL,
+		fps:               fps,
+		maxWebPBytes:      maxBytes,
+		scaleFilter:       scaleFilter,
+		transitionSkipSec: transitionSkipSec,
+		httpClient:        httpClient,
+		wsDialer:          wsDialer,
+		cachedPatch:       make(map[string]StudioPatch),
 	}
 }
 
@@ -342,7 +360,11 @@ func (a *ScreenyAdapter) captureFrames(ctx context.Context, fps, durationMs, tar
 
 	scaleRequired := targetWidth == 128 && targetHeight == 64
 	var frames []*image.RGBA
-	timeout := time.After(time.Duration(durationMs+3000) * time.Millisecond) // safety buffer
+	timeoutDuration := time.Duration(durationMs+5000) * time.Millisecond
+	if a.transitionSkipSec > 0 {
+		timeoutDuration += time.Duration(a.transitionSkipSec*1000) * time.Millisecond
+	}
+	timeout := time.After(timeoutDuration)
 
 	for len(frames) < targetFrameCount {
 		select {
@@ -368,6 +390,17 @@ func (a *ScreenyAdapter) captureFrames(ctx context.Context, fps, durationMs, tar
 
 		if msgType != websocket.BinaryMessage {
 			continue // skip JSON heartbeats / state messages
+		}
+
+		// Screeny Studio performs a 2.0-second crossfade when switching patches.
+		// Bytes 4..8 of the preview packet header contain the patch timer as float32 little-endian.
+		// While timer < transitionSkipSec, the stream is blending the previous patch into the new patch;
+		// we discard these transition frames so previews and animations are crisp and uncorrupted.
+		if len(msgData) == PreviewPacketLen && a.transitionSkipSec > 0 {
+			timer := math.Float32frombits(binary.LittleEndian.Uint32(msgData[4:8]))
+			if timer > 0 && timer < a.transitionSkipSec {
+				continue
+			}
 		}
 
 		frame, err := DecodeScreenyFrame(msgData)

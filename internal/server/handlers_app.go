@@ -414,16 +414,28 @@ func (s *Server) serveExternalAppThumbnail(w http.ResponseWriter, r *http.Reques
 	cacheDir := filepath.Join(s.DataDir, "cache", "previews", provider.Name())
 	cacheFile := filepath.Join(cacheDir, appID+".webp")
 
-	// 1. Serve from disk cache if available
-	if _, err := os.Stat(cacheFile); err == nil {
-		w.Header().Set("Content-Type", "image/webp")
-		w.Header().Set("Cache-Control", "public, max-age=86400")
-		http.ServeFile(w, r, cacheFile)
-		return
+	// Invalidate legacy blended/crossfaded previews once via marker file
+	markerFile := filepath.Join(cacheDir, ".unblended_v2")
+	if _, err := os.Stat(markerFile); os.IsNotExist(err) {
+		_ = os.RemoveAll(cacheDir)
+		_ = os.MkdirAll(cacheDir, 0755)
+		_ = os.WriteFile(markerFile, []byte("v2"), 0644)
+	}
+
+	forceRefresh := r.URL.Query().Get("refresh") == "true"
+
+	// 1. Serve from disk cache if available and not explicitly refreshing
+	if !forceRefresh {
+		if _, err := os.Stat(cacheFile); err == nil {
+			w.Header().Set("Content-Type", "image/webp")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			http.ServeFile(w, r, cacheFile)
+			return
+		}
 	}
 
 	// 2. Render 1.0s preview chunk on demand
-	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	req := providers.RenderRequest{

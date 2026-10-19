@@ -800,6 +800,21 @@ func TestExternalAppThumbnail_OnDemandAndCached(t *testing.T) {
 	s.handleAppThumbnail(rr2, req)
 	assert.Equal(t, http.StatusOK, rr2.Code)
 	assert.Equal(t, dummyChunkWebP1, rr2.Body.Bytes())
+
+	// 3. Third request with ?refresh=true - re-renders and updates cache
+	mock.chunks = []providers.RenderChunk{
+		{WebPBytes: dummyChunkWebP2, DurationMs: 1000},
+	}
+	reqRefresh, _ := http.NewRequest(http.MethodGet, "/preview/app/screeny:clock_test?refresh=true", nil)
+	reqRefresh.SetPathValue("id", "screeny:clock_test")
+	rr3 := httptest.NewRecorder()
+	s.handleAppThumbnail(rr3, reqRefresh)
+	assert.Equal(t, http.StatusOK, rr3.Code)
+	assert.Equal(t, dummyChunkWebP2, rr3.Body.Bytes())
+
+	cachedBytesRefreshed, err := os.ReadFile(cachePath)
+	require.NoError(t, err)
+	assert.Equal(t, dummyChunkWebP2, cachedBytesRefreshed)
 }
 
 func TestExternalAppConfigPreview_WithAndWithoutConfig(t *testing.T) {

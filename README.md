@@ -139,7 +139,7 @@ Tronbyt Server supports pluggable external app providers via the `ExternalAppPro
    - **Fault Tolerance:** If Screeny Studio is temporarily unreachable, Tronbyt Server falls back to cached chunk files to avoid interrupted playback.
 5. **Catalog Provider Filter & Live Previews:**
    - **Dynamic Provider Filter:** When multiple providers (e.g. Tronbyt and Screeny) are active, a Provider dropdown filter dynamically appears on the Add App page, allowing users to filter by provider or view all apps together. If only one provider is configured, the dropdown automatically hides.
-   - **Preview Generation & Caching:** Screeny patches generate on-demand animated WebP previews with automatic disk caching under `cache/previews/<provider>/`, providing live thumbnails in the app catalog and real-time interactive previews during configuration.
+   - **Preview Generation & Crossfade Elimination:** Screeny patches generate on-demand animated WebP previews with automatic disk caching under `cache/previews/<provider>/`. Screeny Studio's built-in 2.0-second patch crossfade is automatically detected and skipped during frame capture, ensuring live catalog thumbnails and rendered device animations are 100% clean, crisp, and free from app-blending artifacts.
 
 **HTTPS (TLS):**
 *   Can be achieved by configuring `TRONBYT_SSL_KEYFILE` and `TRONBYT_SSL_CERTFILE`.

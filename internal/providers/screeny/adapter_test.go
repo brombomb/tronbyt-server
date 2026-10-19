@@ -2,7 +2,9 @@ package screeny
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -75,8 +77,9 @@ func TestScreenyAdapter_Lifecycle(t *testing.T) {
 			}
 			defer func() { _ = conn.Close() }()
 
-			// Send 10 preview frames
+			// Send 15 preview frames with timer = 5.0s (past the 2.05s crossfade)
 			previewPacket := make([]byte, PreviewPacketLen)
+			binary.LittleEndian.PutUint32(previewPacket[4:8], math.Float32bits(5.0))
 			for p := range NPixels {
 				previewPacket[PreviewHeaderLen+p*3] = 100
 				previewPacket[PreviewHeaderLen+p*3+1] = 150
@@ -140,3 +143,76 @@ func TestScreenyAdapter_Lifecycle(t *testing.T) {
 	assert.NotContains(t, setParamReceived, "scale_filter", "scale_filter should not be sent to screeny set_param")
 	assert.True(t, len(chunks[0].WebPBytes) > 0)
 }
+
+func TestScreenyAdapter_DiscardsTransitionFrames(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/bootstrap":
+			bootstrap := StudioBootstrap{
+				Patches: []StudioPatch{
+					{ID: "test_patch", Name: "Test Patch", Playable: true},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(bootstrap)
+
+		case "/api/v1/set_patch":
+			w.WriteHeader(http.StatusOK)
+
+		case "/api/v1/ws":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer func() { _ = conn.Close() }()
+
+			// 1. Send 5 transition frames (timer = 0.5s < 2.05s) with red pixels
+			redPacket := make([]byte, PreviewPacketLen)
+			binary.LittleEndian.PutUint32(redPacket[4:8], math.Float32bits(0.5))
+			for p := range NPixels {
+				redPacket[PreviewHeaderLen+p*3] = 255 // Red
+			}
+			for range 5 {
+				_ = conn.WriteMessage(websocket.BinaryMessage, redPacket)
+				time.Sleep(5 * time.Millisecond)
+			}
+
+			// 2. Send 10 post-transition frames (timer = 2.1s >= 2.05s) with green pixels
+			greenPacket := make([]byte, PreviewPacketLen)
+			binary.LittleEndian.PutUint32(greenPacket[4:8], math.Float32bits(2.1))
+			for p := range NPixels {
+				greenPacket[PreviewHeaderLen+p*3+1] = 255 // Green
+			}
+			for range 10 {
+				_ = conn.WriteMessage(websocket.BinaryMessage, greenPacket)
+				time.Sleep(5 * time.Millisecond)
+			}
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	adapter := NewAdapter(AdapterConfig{
+		StudioURL:         server.URL,
+		FPS:               30,
+		MaxWebPBytes:      5242880,
+		TransitionSkipSec: 2.05,
+	})
+
+	// Request 5 frames (166ms at 30 fps)
+	frames, err := adapter.captureFrames(context.Background(), 30, 166, 64, 32, "none")
+	require.NoError(t, err)
+	require.NotEmpty(t, frames)
+
+	// Verify that the captured frames are GREEN (new patch) and NOT RED (transition frame)
+	for i, frame := range frames {
+		c := frame.RGBAAt(0, 0)
+		assert.Equal(t, uint8(0), c.R, "frame %d should not have red from discarded transition frame", i)
+		assert.Equal(t, uint8(255), c.G, "frame %d should have green from post-transition frame", i)
+	}
+}
+
