@@ -143,7 +143,7 @@ When a user clicks **"Preview on Device"**:
 | :--- | :--- | :--- | :--- | :--- |
 | **Raspberry Pi / Tronberry** | `DeviceRaspberryPi*`, `DeviceTronberry*` | **5,242,880 B** (5 MB) | No duration limit | Unlimited |
 | **ESP32-S3 & Matrix Wide** | `DeviceTronbytS3Wide`, `DeviceMatrixPortalWide`, `DeviceMatrixPortalSquare`, `DeviceTronbytS3`, `DeviceMatrixPortal`, `DeviceWaveshareS3`, `DeviceTidbytGen2` | **450,000 B** (450 KB) | 5,000 ms (5s) | 460,000 B |
-| **Tidbyt Gen 1 & Standard ESP32** | `DeviceTidbytGen1`, `DeviceMatrixPortalWS` | **200,000 B** (200 KB) | 5,000 ms (5s) | 220,000 B |
+| **Tidbyt Gen 1 & Standard ESP32** | `DeviceTidbytGen1`, `DeviceMatrixPortalWS` | **160,000 B** (160 KB) | 5,000 ms (5s) | 220,000 B |
 | **Pixoticker** | `DevicePixoticker` | **50,000 B** (50 KB) | 5,000 ms (5s) | 60,000 B |
 
 ---
@@ -153,7 +153,7 @@ When a user clicks **"Preview on Device"**:
 | Environment Variable | Default | Description |
 | :--- | :--- | :--- |
 | `SCREENY_MAX_WEBP_BYTES` | `5242880` (5 MB) | Global fallback chunk size limit. |
-| `SCREENY_MAX_WEBP_BYTES_ESP` | `200000` (200 KB) | Maximum chunk size budget for ESP32 and Tidbyt Gen 1 hardware. |
+| `SCREENY_MAX_WEBP_BYTES_ESP` | `160000` (160 KB) | Maximum chunk size budget for ESP32 and Tidbyt Gen 1 hardware. |
 | `SCREENY_MAX_WEBP_BYTES_RPI` | `5242880` (5 MB) | Maximum chunk size budget for Raspberry Pi and Tronberry hardware. |
 | `SCREENY_FPS` | `30` | Target frame rate for external animations. |
 | `SCREENY_SCALE_FILTER` | `bicubic` | Default upscaling filter for 128x64 displays (`bicubic`, `scale2x`, `bilinear`, `nearest`). |

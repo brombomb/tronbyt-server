@@ -130,7 +130,8 @@ func (s *Server) handleSetScreenyConfig(w http.ResponseWriter, r *http.Request) 
 			extApps, err := provider.ListApps(ctx)
 			cancel()
 			if err != nil {
-				s.flashAndRedirect(w, r, fmt.Sprintf("Saved Screeny settings, but connection test failed: %v", err), "/settings/content", http.StatusSeeOther)
+				slog.Warn("Screeny connection test failed", "error", err)
+				s.flashAndRedirect(w, r, "Saved Screeny settings, but connection test failed. Please verify the URL.", "/settings/content", http.StatusSeeOther)
 				return
 			}
 			s.flashAndRedirect(w, r, fmt.Sprintf("Connected to Screeny Studio successfully (%d patches discovered).", len(extApps)), "/settings/content", http.StatusSeeOther)

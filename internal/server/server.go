@@ -520,6 +520,9 @@ func (s *Server) ListExternalProviders() []providers.ExternalAppProvider {
 // updateScreenyConfig updates Screeny settings in the DB and running server.
 func (s *Server) updateScreenyConfig(studioURL, scaleFilter string) error {
 	cleanURL := strings.TrimRight(strings.TrimSpace(studioURL), "/")
+	if err := validateExternalProviderURL(cleanURL); err != nil {
+		return fmt.Errorf("invalid Screeny Studio URL: %w", err)
+	}
 	s.Config.ScreenyStudioURL = cleanURL
 	if scaleFilter != "" {
 		s.Config.ScreenyScaleFilter = scaleFilter

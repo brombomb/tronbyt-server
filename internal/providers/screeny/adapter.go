@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -56,6 +55,10 @@ type ScreenyAdapter struct {
 	cachedApps  []providers.ExternalAppMeta
 	cachedPatch map[string]StudioPatch
 	lastCached  time.Time
+
+	// Active patch tracking to preserve continuous procedural animation streams
+	activePatchMu sync.Mutex
+	activePatchID string
 }
 
 // NewAdapter creates a new ScreenyAdapter with the provided configuration.
@@ -216,9 +219,19 @@ func (a *ScreenyAdapter) RenderAppChunks(ctx context.Context, req providers.Rend
 
 	maxChunkSize := req.MaxChunkSize
 
-	// 1. Activate the target patch in screeny-studio
-	if err := a.activatePatch(ctx, req.AppID); err != nil {
-		return nil, fmt.Errorf("activating patch %s: %w", req.AppID, err)
+	// 1. Activate the target patch in screeny-studio ONLY if it is not already active.
+	// Preserves continuous procedural generation (e.g. Overland, Knot) across chunk cycles.
+	a.activePatchMu.Lock()
+	patchChanged := a.activePatchID != req.AppID
+	if patchChanged {
+		a.activePatchID = req.AppID
+	}
+	a.activePatchMu.Unlock()
+
+	if patchChanged {
+		if err := a.activatePatch(ctx, req.AppID); err != nil {
+			return nil, fmt.Errorf("activating patch %s: %w", req.AppID, err)
+		}
 	}
 
 	scaleFilter := a.scaleFilter
@@ -239,7 +252,7 @@ func (a *ScreenyAdapter) RenderAppChunks(ctx context.Context, req providers.Rend
 	}
 
 	// 3. Connect to screeny-studio WebSocket preview stream and capture frames
-	frames, err := a.captureFrames(ctx, fps, durationMs, req.Width, req.Height, scaleFilter)
+	frames, err := a.captureFrames(ctx, fps, durationMs, req.Width, req.Height, scaleFilter, patchChanged)
 	if err != nil {
 		return nil, fmt.Errorf("capturing screeny frames: %w", err)
 	}
@@ -267,8 +280,7 @@ func (a *ScreenyAdapter) fetchBootstrap(ctx context.Context) (*StudioBootstrap, 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("bootstrap returned status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("bootstrap returned status %d", resp.StatusCode)
 	}
 
 	var bootstrap StudioBootstrap
@@ -300,8 +312,7 @@ func (a *ScreenyAdapter) activatePatch(ctx context.Context, patchID string) erro
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("set_patch status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("set_patch status %d", resp.StatusCode)
 	}
 
 	return nil
@@ -331,15 +342,14 @@ func (a *ScreenyAdapter) setParam(ctx context.Context, paramID string, val float
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("set_param status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("set_param status %d", resp.StatusCode)
 	}
 
 	return nil
 }
 
 // captureFrames opens a WebSocket to /api/v1/ws and collects frames for durationMs.
-func (a *ScreenyAdapter) captureFrames(ctx context.Context, fps, durationMs, targetWidth, targetHeight int, scaleFilter string) ([]*image.RGBA, error) {
+func (a *ScreenyAdapter) captureFrames(ctx context.Context, fps, durationMs, targetWidth, targetHeight int, scaleFilter string, patchChanged bool) ([]*image.RGBA, error) {
 	u, err := url.Parse(a.studioURL)
 	if err != nil {
 		return nil, fmt.Errorf("parsing studio URL: %w", err)
@@ -361,11 +371,15 @@ func (a *ScreenyAdapter) captureFrames(ctx context.Context, fps, durationMs, tar
 	if targetFrameCount <= 0 {
 		targetFrameCount = 30
 	}
+	const maxCapturedFrames = 1800 // safety limit: 60s @ 30 FPS
+	if targetFrameCount > maxCapturedFrames {
+		targetFrameCount = maxCapturedFrames
+	}
 
 	scaleRequired := targetWidth == 128 && targetHeight == 64
 	var frames []*image.RGBA
 	timeoutDuration := time.Duration(durationMs+5000) * time.Millisecond
-	if a.transitionSkipSec > 0 {
+	if patchChanged && a.transitionSkipSec > 0 {
 		timeoutDuration += time.Duration(a.transitionSkipSec*1000) * time.Millisecond
 	}
 	timeout := time.After(timeoutDuration)
@@ -397,10 +411,8 @@ func (a *ScreenyAdapter) captureFrames(ctx context.Context, fps, durationMs, tar
 		}
 
 		// Screeny Studio performs a 2.0-second crossfade when switching patches.
-		// Bytes 4..8 of the preview packet header contain the patch timer as float32 little-endian.
-		// While timer < transitionSkipSec, the stream is blending the previous patch into the new patch;
-		// we discard these transition frames so previews and animations are crisp and uncorrupted.
-		if len(msgData) == PreviewPacketLen && a.transitionSkipSec > 0 {
+		// While timer < transitionSkipSec, discard blend frames only if a patch switch just occurred.
+		if patchChanged && len(msgData) == PreviewPacketLen && a.transitionSkipSec > 0 {
 			timer := math.Float32frombits(binary.LittleEndian.Uint32(msgData[4:8]))
 			if timer < a.transitionSkipSec {
 				continue

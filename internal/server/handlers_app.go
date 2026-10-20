@@ -229,6 +229,15 @@ func (s *Server) handleAddAppPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.isExternalAppPath(appPath) {
+		_, extAppID, ok := s.parseExternalAppPath(appPath)
+		if !ok {
+			http.Error(w, "Invalid app path", http.StatusBadRequest)
+			return
+		}
+		if _, err := sanitizeAppID(extAppID); err != nil {
+			http.Error(w, "Invalid external app ID", http.StatusBadRequest)
+			return
+		}
 		if meta := s.getAppMetadata(appPath); meta != nil && meta.Name != "" {
 			appName = meta.Name
 		}
@@ -433,8 +442,17 @@ func (s *Server) ensureCleanPreviewCache(providerName string) string {
 }
 
 func (s *Server) serveExternalAppThumbnail(w http.ResponseWriter, r *http.Request, provider providers.ExternalAppProvider, appID string) {
+	safeAppID, err := sanitizeAppID(appID)
+	if err != nil {
+		http.Error(w, "Invalid app ID", http.StatusBadRequest)
+		return
+	}
 	cacheDir := s.ensureCleanPreviewCache(provider.Name())
-	cacheFile := filepath.Join(cacheDir, appID+".webp")
+	cacheFile, err := securejoin.SecureJoin(cacheDir, safeAppID+".webp")
+	if err != nil {
+		http.Error(w, "Invalid cache file path", http.StatusBadRequest)
+		return
+	}
 
 	forceRefresh := r.URL.Query().Get("refresh") == "true"
 
@@ -447,7 +465,7 @@ func (s *Server) serveExternalAppThumbnail(w http.ResponseWriter, r *http.Reques
 	}
 
 	// 2. Render preview chunk on demand using singleflight to deduplicate concurrent requests
-	key := fmt.Sprintf("%s:%s", provider.Name(), appID)
+	key := fmt.Sprintf("%s:%s", provider.Name(), safeAppID)
 	val, err, _ := s.thumbnailSingleFlight.Do(key, func() (any, error) {
 		// Re-check disk cache inside singleflight
 		if !forceRefresh {
@@ -460,7 +478,7 @@ func (s *Server) serveExternalAppThumbnail(w http.ResponseWriter, r *http.Reques
 		defer cancel()
 
 		req := providers.RenderRequest{
-			AppID:        appID,
+			AppID:        safeAppID,
 			Width:        64,
 			Height:       32,
 			FPS:          15,
@@ -479,7 +497,7 @@ func (s *Server) serveExternalAppThumbnail(w http.ResponseWriter, r *http.Reques
 	})
 
 	if err != nil {
-		slog.Warn("Failed to render external app thumbnail", "provider", provider.Name(), "app", appID, "error", err)
+		slog.Warn("Failed to render external app thumbnail", "provider", provider.Name(), "app", safeAppID, "error", err)
 		http.NotFound(w, r)
 		return
 	}
@@ -511,11 +529,18 @@ func (s *Server) warmExternalAppThumbnails(provider providers.ExternalAppProvide
 	cacheDir := s.ensureCleanPreviewCache(provider.Name())
 	go func() {
 		for _, app := range apps {
-			cacheFile := filepath.Join(cacheDir, app.ID+".webp")
+			safeAppID, err := sanitizeAppID(app.ID)
+			if err != nil {
+				continue
+			}
+			cacheFile, err := securejoin.SecureJoin(cacheDir, safeAppID+".webp")
+			if err != nil {
+				continue
+			}
 			if _, err := os.Stat(cacheFile); err == nil {
 				continue // already cached
 			}
-			key := fmt.Sprintf("%s:%s", provider.Name(), app.ID)
+			key := fmt.Sprintf("%s:%s", provider.Name(), safeAppID)
 			_, _, _ = s.thumbnailSingleFlight.Do(key, func() (any, error) {
 				if b, err := os.ReadFile(cacheFile); err == nil && len(b) > 0 {
 					return b, nil
@@ -523,7 +548,7 @@ func (s *Server) warmExternalAppThumbnails(provider providers.ExternalAppProvide
 				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 				defer cancel()
 				req := providers.RenderRequest{
-					AppID:        app.ID,
+					AppID:        safeAppID,
 					Width:        64,
 					Height:       32,
 					FPS:          15,
@@ -971,6 +996,11 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 		}
 
 		if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
+			safeAppID, err := sanitizeAppID(appID)
+			if err != nil {
+				http.Error(w, "Invalid external app ID", http.StatusBadRequest)
+				return
+			}
 			width, height := device.Type.CanvasSize()
 			if device.Type.Supports2x() {
 				width *= 2
@@ -989,7 +1019,7 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 			}
 			previewDurationMs := min(max(dwellSecs*1000, 5000), 60000)
 			req := providers.RenderRequest{
-				AppID:        appID,
+				AppID:        safeAppID,
 				Width:        width,
 				Height:       height,
 				FPS:          fps,
@@ -1003,7 +1033,7 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 
 			chunks, err := provider.RenderAppChunks(ctx, req)
 			if err != nil || len(chunks) == 0 {
-				slog.Error("Preview render failed for external app", "provider", provider.Name(), "app", appID, "error", err)
+				slog.Error("Preview render failed for external app", "provider", provider.Name(), "app", safeAppID, "error", err)
 				http.Error(w, "Render failed", http.StatusInternalServerError)
 				return
 			}
@@ -1045,6 +1075,11 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 	if app.Path != nil && s.isExternalAppPath(*app.Path) {
 		provider, appID, ok := s.parseExternalAppPath(*app.Path)
 		if ok {
+			safeAppID, err := sanitizeAppID(appID)
+			if err != nil {
+				http.Error(w, "Invalid external app ID", http.StatusBadRequest)
+				return
+			}
 			deviceWebpDir, err := s.ensureDeviceImageDir(device.ID)
 			var fullPath string
 			if err == nil {
@@ -1080,7 +1115,7 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 			}
 			previewDurationMs := min(max(dwellSecs*1000, 5000), 60000)
 			req := providers.RenderRequest{
-				AppID:        appID,
+				AppID:        safeAppID,
 				Width:        width,
 				Height:       height,
 				FPS:          fps,
@@ -1238,21 +1273,21 @@ func (s *Server) handlePushPreview(w http.ResponseWriter, r *http.Request) {
 			slog.Error("Failed to save app chunks on push preview", "device", device.ID, "app", app.Iname, "error", err)
 		}
 
-		// Fallback for HTTP device polling: save primary image
-		primaryBytes := chunks[0].WebPBytes
-		if len(chunks[0].FullWebPBytes) > 0 && len(chunks[0].FullWebPBytes) <= maxChunkSize {
-			primaryBytes = chunks[0].FullWebPBytes
-		}
-		if err := s.savePushedImage(device.ID, app.Iname, "", primaryBytes); err != nil {
-			slog.Warn("Failed to save pushed fallback image", "error", err)
-		}
-
 		// If multi-chunk and device is polling HTTP /next, set active chunk sequence
 		if len(chunks) > 1 {
 			s.deviceChunkMu.Lock()
 			s.deviceCurrentChunkApp[device.ID] = app.Iname
 			s.deviceChunkIndices[device.ID] = 0
 			s.deviceChunkMu.Unlock()
+		} else {
+			// Single-chunk fallback for HTTP device polling
+			primaryBytes := chunks[0].WebPBytes
+			if len(chunks[0].FullWebPBytes) > 0 && len(chunks[0].FullWebPBytes) <= maxChunkSize {
+				primaryBytes = chunks[0].FullWebPBytes
+			}
+			if err := s.savePushedImage(device.ID, app.Iname, "", primaryBytes); err != nil {
+				slog.Warn("Failed to save pushed fallback image", "error", err)
+			}
 		}
 
 		// Stream preview to WebSocket device
