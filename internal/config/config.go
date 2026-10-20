@@ -47,6 +47,7 @@ type Settings struct {
 	AwtrixURL         string `env:"AWTRIX_URL"`
 	AwtrixFPS         int    `env:"AWTRIX_FPS"          envDefault:"15"`
 	AwtrixScaleFilter string `env:"AWTRIX_SCALE_FILTER" envDefault:"bicubic"`
+	AwtrixLayout      string `env:"AWTRIX_LAYOUT"       envDefault:"center"`
 
 	// OIDC Configuration
 	OIDCEnabled          bool   `env:"OIDC_ENABLED"`

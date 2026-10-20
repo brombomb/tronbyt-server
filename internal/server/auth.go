@@ -97,6 +97,10 @@ func (s *Server) getSettingsContentData(user *data.User) TemplateData {
 	if awtrixFilter == "" {
 		awtrixFilter = "bicubic"
 	}
+	awtrixLayout := s.Config.AwtrixLayout
+	if awtrixLayout == "" {
+		awtrixLayout = "center"
+	}
 	var awtrixConnected bool
 	var awtrixAppCount int
 	var awtrixStatus string
@@ -134,6 +138,7 @@ func (s *Server) getSettingsContentData(user *data.User) TemplateData {
 		ScreenyStatus:         screenyStatus,
 		AwtrixURL:             awtrixURL,
 		AwtrixScaleFilter:     awtrixFilter,
+		AwtrixLayout:          awtrixLayout,
 		AwtrixConnected:       awtrixConnected,
 		AwtrixAppCount:        awtrixAppCount,
 		AwtrixStatus:          awtrixStatus,
@@ -184,7 +189,10 @@ func (s *Server) handleSetScreenyConfig(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleSetAwtrixConfig(w http.ResponseWriter, r *http.Request) {
-	s.handleExternalProviderConfig(w, r, "Awtrix NG", "awtrix", "awtrix_url", "awtrix_scale_filter", "apps", s.updateAwtrixConfig)
+	layout := strings.TrimSpace(r.FormValue("awtrix_layout"))
+	s.handleExternalProviderConfig(w, r, "Awtrix NG", "awtrix", "awtrix_url", "awtrix_scale_filter", "apps", func(u, f string) error {
+		return s.updateAwtrixConfig(u, f, layout)
+	})
 }
 
 func (s *Server) loginTemplateData(r *http.Request, flashes []string) TemplateData {

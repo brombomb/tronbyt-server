@@ -26,6 +26,7 @@ type AdapterConfig struct {
 	BaseURL     string
 	FPS         int
 	ScaleFilter string
+	Layout      string
 	HTTPClient  *http.Client
 }
 
@@ -35,6 +36,7 @@ type AwtrixAdapter struct {
 	baseURL     string
 	fps         int
 	scaleFilter string
+	layout      string
 	httpClient  *http.Client
 }
 
@@ -52,6 +54,10 @@ func NewAdapter(cfg AdapterConfig) *AwtrixAdapter {
 	if scaleFilter == "" {
 		scaleFilter = screeny.FilterBicubic
 	}
+	layout := cfg.Layout
+	if layout == "" {
+		layout = "center"
+	}
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
@@ -62,6 +68,7 @@ func NewAdapter(cfg AdapterConfig) *AwtrixAdapter {
 		baseURL:     baseURL,
 		fps:         fps,
 		scaleFilter: scaleFilter,
+		layout:      layout,
 		httpClient:  httpClient,
 	}
 }
@@ -243,7 +250,17 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 		}
 	}
 
-	// 2. Activate the app on the AWTRIX display
+	// 2. Freeze AWTRIX auto-rotation and disable transitions so only this single app renders
+	freezeURL := fmt.Sprintf("%s/api/v1/settings", a.baseURL)
+	freezeBody := []byte(`{"autoTransition":false,"transitionDurationMs":0}`)
+	if fReq, err := http.NewRequestWithContext(ctx, http.MethodPatch, freezeURL, bytes.NewReader(freezeBody)); err == nil {
+		fReq.Header.Set("Content-Type", "application/json")
+		if fResp, err := a.httpClient.Do(fReq); err == nil {
+			_ = fResp.Body.Close()
+		}
+	}
+
+	// 3. Activate the app on the AWTRIX display
 	activateURL := fmt.Sprintf("%s/api/v1/apps/active", a.baseURL)
 	activateBody, _ := json.Marshal(map[string]string{"name": req.AppID})
 	actReq, err := http.NewRequestWithContext(ctx, http.MethodPut, activateURL, bytes.NewReader(activateBody))
@@ -265,7 +282,7 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 		return nil, ctx.Err()
 	}
 
-	// 3. Determine capture parameters
+	// 4. Determine capture parameters
 	fps := req.FPS
 	if fps <= 0 {
 		fps = a.fps
@@ -285,8 +302,10 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 
 	scaleRequired := req.Width == 128 && req.Height == 64
 	var frames []*image.RGBA
+	var layoutDetermined bool
+	var layoutMode string
 
-	// 4. Capture frames
+	// 5. Capture frames
 	ticker := time.NewTicker(frameInterval)
 	defer ticker.Stop()
 
@@ -326,6 +345,45 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 			img.Pix[offset+3] = 0xFF
 		}
 
+		// Determine layout mode on the first frame with visible pixels
+		if !layoutDetermined && a.layout != "native" && sd.Width == 64 && sd.Height == 32 {
+			maxY := 0
+			maxX := 0
+			hasPixels := false
+			for y := range 32 {
+				for x := range 64 {
+					off := img.PixOffset(x, y)
+					if img.Pix[off] != 0 || img.Pix[off+1] != 0 || img.Pix[off+2] != 0 {
+						hasPixels = true
+						if y > maxY {
+							maxY = y
+						}
+						if x > maxX {
+							maxX = x
+						}
+					}
+				}
+			}
+			if hasPixels {
+				layoutDetermined = true
+				if maxY <= 7 {
+					layoutMode = "8row"
+				} else if maxY <= 15 {
+					if maxX <= 52 {
+						layoutMode = "16row-narrow"
+					} else {
+						layoutMode = "16row-full"
+					}
+				} else {
+					layoutMode = "32row"
+				}
+			}
+		}
+
+		if a.layout != "native" && layoutDetermined && sd.Width == 64 && sd.Height == 32 {
+			img = applyAwtrixLayout(img, layoutMode)
+		}
+
 		if scaleRequired {
 			img = screeny.ScaleFrame2x(img, a.scaleFilter)
 		}
@@ -339,4 +397,58 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 
 	// 5. Partition frames into WebP chunk(s)
 	return screeny.SplitFramesIntoChunks(frames, fps, req.MaxChunkSize, req.MaxChunkDurationMs)
+}
+
+func applyAwtrixLayout(src *image.RGBA, mode string) *image.RGBA {
+	switch mode {
+	case "8row":
+		// 8-row app (e.g. Ghost Parade: 32x8): 2x integer scale to 64x16, centered vertically at Y=8..23
+		dst := image.NewRGBA(image.Rect(0, 0, 64, 32))
+		for y := 0; y <= 7; y++ {
+			for x := 0; x <= 31; x++ {
+				srcOff := src.PixOffset(x, y)
+				r, g, b, a := src.Pix[srcOff], src.Pix[srcOff+1], src.Pix[srcOff+2], src.Pix[srcOff+3]
+				for dy := range 2 {
+					for dx := range 2 {
+						dstOff := dst.PixOffset(x*2+dx, 8+y*2+dy)
+						dst.Pix[dstOff] = r
+						dst.Pix[dstOff+1] = g
+						dst.Pix[dstOff+2] = b
+						dst.Pix[dstOff+3] = a
+					}
+				}
+			}
+		}
+		return dst
+
+	case "16row-narrow":
+		// 16-row 52-column app (e.g. Beautiful Weather: 52x16): center horizontally at X=6, vertically at Y=8
+		dst := image.NewRGBA(image.Rect(0, 0, 64, 32))
+		for y := 0; y <= 15; y++ {
+			for x := 0; x <= 51; x++ {
+				if x+6 >= 64 {
+					continue
+				}
+				srcOff := src.PixOffset(x, y)
+				dstOff := dst.PixOffset(x+6, y+8)
+				copy(dst.Pix[dstOff:dstOff+4], src.Pix[srcOff:srcOff+4])
+			}
+		}
+		return dst
+
+	case "16row-full":
+		// 16-row 64-column app (e.g. Pixel Aquarium: 64x16): center vertically at Y=8 across full width
+		dst := image.NewRGBA(image.Rect(0, 0, 64, 32))
+		for y := 0; y <= 15; y++ {
+			for x := 0; x <= 63; x++ {
+				srcOff := src.PixOffset(x, y)
+				dstOff := dst.PixOffset(x, y+8)
+				copy(dst.Pix[dstOff:dstOff+4], src.Pix[srcOff:srcOff+4])
+			}
+		}
+		return dst
+
+	default:
+		return src
+	}
 }

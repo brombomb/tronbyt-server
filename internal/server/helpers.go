@@ -103,6 +103,7 @@ type TemplateData struct {
 	// Awtrix Provider Settings
 	AwtrixURL         string
 	AwtrixScaleFilter string
+	AwtrixLayout      string
 	AwtrixConnected   bool
 	AwtrixAppCount    int
 	AwtrixStatus      string

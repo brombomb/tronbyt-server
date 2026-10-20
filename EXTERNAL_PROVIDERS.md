@@ -287,6 +287,7 @@ External providers can be configured via environment variables, `.env`, or dynam
 | `AWTRIX_URL` | *None* | Base URL of AWTRIX NG or virtual hub container (e.g. `http://192.168.1.15:7080`). |
 | `AWTRIX_FPS` | `15` | Frame rate for virtual screen polling (typically 15–20 FPS). |
 | `AWTRIX_SCALE_FILTER` | `bicubic` | Default 128x64 upscaling filter: `bicubic`, `scale2x`, `bilinear`, `nearest`. |
+| `AWTRIX_LAYOUT` | `center` | Layout mode for shorter widgets: `center` (auto-centers 16-row widgets, 2x scales 8-row widgets to fill display), `native` (raw top-left). |
 
 ---
 

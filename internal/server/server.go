@@ -195,13 +195,17 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 	if val, err := s.getSetting("awtrix_scale_filter"); err == nil && val != "" {
 		cfg.AwtrixScaleFilter = val
 	}
+	if val, err := s.getSetting("awtrix_layout"); err == nil && val != "" {
+		cfg.AwtrixLayout = val
+	}
 	if cfg.AwtrixURL != "" {
 		s.RegisterExternalProvider(awtrix.NewAdapter(awtrix.AdapterConfig{
 			BaseURL:     cfg.AwtrixURL,
 			FPS:         cfg.AwtrixFPS,
 			ScaleFilter: cfg.AwtrixScaleFilter,
+			Layout:      cfg.AwtrixLayout,
 		}))
-		slog.Info("Registered Awtrix external app provider", "url", cfg.AwtrixURL, "scaleFilter", cfg.AwtrixScaleFilter)
+		slog.Info("Registered Awtrix external app provider", "url", cfg.AwtrixURL, "scaleFilter", cfg.AwtrixScaleFilter, "layout", cfg.AwtrixLayout)
 	}
 
 	// Load OIDC settings from DB
@@ -568,16 +572,22 @@ func (s *Server) updateScreenyConfig(studioURL, scaleFilter string) error {
 }
 
 // updateAwtrixConfig updates Awtrix settings in the DB and running server.
-func (s *Server) updateAwtrixConfig(awtrixURL, scaleFilter string) error {
+func (s *Server) updateAwtrixConfig(awtrixURL, scaleFilter, layout string) error {
 	cleanURL := strings.TrimRight(strings.TrimSpace(awtrixURL), "/")
 	s.Config.AwtrixURL = cleanURL
 	if scaleFilter != "" {
 		s.Config.AwtrixScaleFilter = scaleFilter
 	}
+	if layout != "" {
+		s.Config.AwtrixLayout = layout
+	}
 	if err := s.setSetting("awtrix_url", s.Config.AwtrixURL); err != nil {
 		return err
 	}
 	if err := s.setSetting("awtrix_scale_filter", s.Config.AwtrixScaleFilter); err != nil {
+		return err
+	}
+	if err := s.setSetting("awtrix_layout", s.Config.AwtrixLayout); err != nil {
 		return err
 	}
 
@@ -586,9 +596,10 @@ func (s *Server) updateAwtrixConfig(awtrixURL, scaleFilter string) error {
 			BaseURL:     s.Config.AwtrixURL,
 			FPS:         s.Config.AwtrixFPS,
 			ScaleFilter: s.Config.AwtrixScaleFilter,
+			Layout:      s.Config.AwtrixLayout,
 		})
 		s.RegisterExternalProvider(adapter)
-		slog.Info("Updated Awtrix external app provider", "url", s.Config.AwtrixURL, "scaleFilter", s.Config.AwtrixScaleFilter)
+		slog.Info("Updated Awtrix external app provider", "url", s.Config.AwtrixURL, "scaleFilter", s.Config.AwtrixScaleFilter, "layout", s.Config.AwtrixLayout)
 		go s.preheatExternalAppThumbnails()
 	} else {
 		s.externalProvidersMu.Lock()

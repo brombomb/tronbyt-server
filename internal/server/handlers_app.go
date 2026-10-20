@@ -426,11 +426,11 @@ const externalAppThumbnailDurationMs = 3000
 
 func (s *Server) ensureCleanPreviewCache(providerName string) string {
 	cacheDir := filepath.Join(s.DataDir, "cache", "previews", providerName)
-	markerFile := filepath.Join(cacheDir, ".previews_v4")
+	markerFile := filepath.Join(cacheDir, ".previews_v5")
 	if _, err := os.Stat(markerFile); os.IsNotExist(err) {
 		_ = os.RemoveAll(cacheDir)
 		_ = os.MkdirAll(cacheDir, 0755)
-		_ = os.WriteFile(markerFile, []byte("v4"), 0644)
+		_ = os.WriteFile(markerFile, []byte("v5"), 0644)
 
 		s.appChunksMu.Lock()
 		s.appChunksCache = make(map[string][]providers.RenderChunk)

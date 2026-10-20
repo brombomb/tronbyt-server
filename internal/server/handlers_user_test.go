@@ -248,11 +248,13 @@ func TestHandleSetAwtrixConfig(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "AWTRIX NG")
 	require.Contains(t, rr.Body.String(), `name="awtrix_url"`)
 	require.Contains(t, rr.Body.String(), `name="awtrix_scale_filter"`)
+	require.Contains(t, rr.Body.String(), `name="awtrix_layout"`)
 
 	// 2. POST update awtrix config
 	form := url.Values{}
 	form.Add("awtrix_url", "http://localhost:7080")
 	form.Add("awtrix_scale_filter", "scale2x")
+	form.Add("awtrix_layout", "center")
 	postReq := httptest.NewRequest(http.MethodPost, "/settings/awtrix", strings.NewReader(form.Encode()))
 	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	for _, cookie := range seedRR.Result().Cookies() {
@@ -264,12 +266,17 @@ func TestHandleSetAwtrixConfig(t *testing.T) {
 	require.Equal(t, http.StatusSeeOther, postRR.Code)
 	require.Equal(t, "http://localhost:7080", s.Config.AwtrixURL)
 	require.Equal(t, "scale2x", s.Config.AwtrixScaleFilter)
+	require.Equal(t, "center", s.Config.AwtrixLayout)
 	require.NotNil(t, s.GetExternalProvider("awtrix"))
 
 	// Check DB setting
 	val, err := s.getSetting("awtrix_url")
 	require.NoError(t, err)
 	require.Equal(t, "http://localhost:7080", val)
+
+	valLayout, err := s.getSetting("awtrix_layout")
+	require.NoError(t, err)
+	require.Equal(t, "center", valLayout)
 }
 
 func TestHandleEditUserPostUpdatesEmail(t *testing.T) {
