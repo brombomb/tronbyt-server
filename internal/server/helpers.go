@@ -108,10 +108,12 @@ type TemplateData struct {
 	AwtrixStatus      string
 
 	// App Config
-	App         *data.App
-	Schema      template.JS
-	AppConfig   map[string]any
-	AppMetadata *apps.AppMetadata
+	App                  *data.App
+	Schema               template.JS
+	AppConfig            map[string]any
+	AppMetadata          *apps.AppMetadata
+	ExternalAppURL       string
+	ExternalProviderName string
 
 	// Device Update Extras
 	ColorFilterOptions       []ColorFilterOption

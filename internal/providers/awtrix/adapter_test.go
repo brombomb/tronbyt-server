@@ -96,9 +96,9 @@ func TestAwtrixAdapter_GetAppSchema(t *testing.T) {
 
 	assert.Equal(t, "timeMode", schema.Schema[0].ID)
 	assert.Equal(t, "Clock layout", schema.Schema[0].Name)
-	assert.Equal(t, "typeahead", schema.Schema[0].Type)
+	assert.Equal(t, "dropdown", schema.Schema[0].Type)
 	assert.Equal(t, "time24h", schema.Schema[1].ID)
-	assert.Equal(t, "bool", schema.Schema[1].Type)
+	assert.Equal(t, "onoff", schema.Schema[1].Type)
 	assert.Equal(t, "timeColor", schema.Schema[2].ID)
 	assert.Equal(t, "color", schema.Schema[2].Type)
 }

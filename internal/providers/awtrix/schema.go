@@ -23,6 +23,7 @@ type AwtrixField struct {
 	Help     string   `json:"help,omitempty"`
 	Options  []any    `json:"options,omitempty"`
 	Group    string   `json:"group,omitempty"`
+	Unit     string   `json:"unit,omitempty"`
 	Path     []string `json:"path,omitempty"`
 	Default  any      `json:"default,omitempty"`
 	Value    any      `json:"value,omitempty"`
@@ -227,17 +228,17 @@ func TranslateAwtrixSchema(resp AwtrixConfigResponse, isBuiltin bool) ([]byte, e
 
 		switch f.Type {
 		case "bool":
-			field.Type = "bool"
+			field.Type = "onoff"
 			if d, ok := f.Default.(bool); ok {
-				field.Default = d
+				field.Default = fmt.Sprintf("%t", d)
 			} else if v, ok := f.Value.(bool); ok {
-				field.Default = v
+				field.Default = fmt.Sprintf("%t", v)
 			} else {
-				field.Default = false
+				field.Default = "false"
 			}
 
 		case "select":
-			field.Type = "typeahead"
+			field.Type = "dropdown"
 			var opts []PixletOption
 			for _, o := range f.Options {
 				valStr := fmt.Sprintf("%v", o)
@@ -272,8 +273,21 @@ func TranslateAwtrixSchema(resp AwtrixConfigResponse, isBuiltin bool) ([]byte, e
 				field.Default = "#ffffff"
 			}
 
+		case "number", "slider":
+			field.Type = "text"
+			if f.Unit != "" && desc != "" {
+				field.Description = fmt.Sprintf("%s (Unit: %s)", desc, f.Unit)
+			} else if f.Unit != "" {
+				field.Description = fmt.Sprintf("Unit: %s", f.Unit)
+			}
+			if f.Default != nil {
+				field.Default = fmt.Sprintf("%v", f.Default)
+			} else if f.Value != nil {
+				field.Default = fmt.Sprintf("%v", f.Value)
+			}
+
 		default:
-			field.Type = "string"
+			field.Type = "text"
 			if f.Default != nil {
 				field.Default = fmt.Sprintf("%v", f.Default)
 			}
@@ -332,6 +346,20 @@ func ConvertUserConfigToAwtrix(fields []AwtrixField, userConfig map[string]any) 
 							if n, err := strconv.Atoi(s); err == nil {
 								converted = n
 							}
+						}
+					}
+				}
+			case "number", "slider":
+				if s, ok := v.(string); ok {
+					if strings.Contains(s, ".") {
+						if fl, err := strconv.ParseFloat(s, 64); err == nil {
+							converted = fl
+						}
+					} else {
+						if n, err := strconv.Atoi(s); err == nil {
+							converted = n
+						} else if fl, err := strconv.ParseFloat(s, 64); err == nil {
+							converted = fl
 						}
 					}
 				}

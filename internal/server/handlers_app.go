@@ -618,6 +618,20 @@ func (s *Server) handleConfigAppGet(w http.ResponseWriter, r *http.Request) {
 
 	deleteOnCancel := r.URL.Query().Get("delete_on_cancel") == "true"
 
+	var externalAppURL string
+	var externalProviderName string
+	if app.Path != nil && s.isExternalAppPath(*app.Path) {
+		if provider, _, ok := s.parseExternalAppPath(*app.Path); ok {
+			if provider.Name() == "awtrix" && s.Config.AwtrixURL != "" {
+				externalAppURL = s.Config.AwtrixURL + "/#/apps"
+				externalProviderName = "AWTRIX NG"
+			} else if provider.Name() == "screeny" && s.Config.ScreenyStudioURL != "" {
+				externalAppURL = s.Config.ScreenyStudioURL
+				externalProviderName = "Screeny"
+			}
+		}
+	}
+
 	var appMetadata *apps.AppMetadata
 	if app.Path != nil {
 		appMetadata = s.getAppMetadata(*app.Path)
@@ -633,6 +647,8 @@ func (s *Server) handleConfigAppGet(w http.ResponseWriter, r *http.Request) {
 		ColorFilterOptions:       s.getColorFilterChoices(),
 		ShowFullAnimationOptions: s.getShowFullAnimationChoices(),
 		AppMetadata:              appMetadata,
+		ExternalAppURL:           externalAppURL,
+		ExternalProviderName:     externalProviderName,
 	})
 }
 
