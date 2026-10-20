@@ -43,6 +43,11 @@ type Settings struct {
 	ScreenyMaxWebPBytesRPi int    `env:"SCREENY_MAX_WEBP_BYTES_RPI" envDefault:"5242880"`
 	ScreenyScaleFilter     string `env:"SCREENY_SCALE_FILTER"       envDefault:"bicubic"`
 
+	// Awtrix Integration Configuration
+	AwtrixURL         string `env:"AWTRIX_URL"`
+	AwtrixFPS         int    `env:"AWTRIX_FPS"          envDefault:"15"`
+	AwtrixScaleFilter string `env:"AWTRIX_SCALE_FILTER" envDefault:"bicubic"`
+
 	// OIDC Configuration
 	OIDCEnabled          bool   `env:"OIDC_ENABLED"`
 	OIDCIssuerURL        string `env:"OIDC_ISSUER_URL"`

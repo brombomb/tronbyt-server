@@ -115,6 +115,9 @@ The server can be configured via environment variables or `.env` file:
 *   `SCREENY_MAX_WEBP_BYTES_ESP`: Maximum chunk size for ESP32 devices (default: `160000` / 160 KB) to fit safely within device RAM and firmware buffer limits during double-buffering (on Tidbyt Gen 1). Devices with expanded 460,000-byte firmware buffers (ESP32-S3, Matrix Wide, Tronbyt S3 Wide, Gen 2) automatically utilize 450 KB (`450000` bytes), and Pixoticker uses 50 KB (`50000` bytes).
 *   `SCREENY_MAX_WEBP_BYTES_RPI`: Maximum chunk size for Raspberry Pi and Tronberry devices (default: `5242880` / 5 MB) utilizing their expanded memory capacity.
 *   `SCREENY_SCALE_FILTER`: Global 128x64 upscaling filter algorithm: `bicubic`, `scale2x`, `bilinear`, `nearest` (default: `bicubic`). Can also be customized per installed app instance in the web UI.
+*   `AWTRIX_URL`: Base URL of a running `AWTRIX NG` instance or virtual hub container (e.g. `http://192.168.1.15:7080`). When set, Awtrix apps (Time, Date, Berry scripts) are automatically discovered and badged with `[Awtrix]` in the Add App catalog, translated to native Pixlet configuration forms, and rendered into WebP animations.
+*   `AWTRIX_FPS`: Frame rate for Awtrix screen capture (default: `15`).
+*   `AWTRIX_SCALE_FILTER`: Global 128x64 upscaling filter algorithm for Awtrix apps: `bicubic`, `scale2x`, `bilinear`, `nearest` (default: `bicubic`).
 *   `GITHUB_TOKEN`: GitHub token for private app repositories (optional).
 *   `REDIS_URL`: Redis connection string for caching (optional).
 *   `LOG_LEVEL`: Logging verbosity: `DEBUG`, `INFO`, `WARN`, `ERROR` (default: `INFO`).

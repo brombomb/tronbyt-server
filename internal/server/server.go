@@ -24,6 +24,7 @@ import (
 	"tronbyt-server/internal/config"
 	"tronbyt-server/internal/data"
 	"tronbyt-server/internal/providers"
+	"tronbyt-server/internal/providers/awtrix"
 	"tronbyt-server/internal/providers/screeny"
 	syncer "tronbyt-server/internal/sync"
 	"tronbyt-server/web"
@@ -185,6 +186,22 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 			ScaleFilter:  cfg.ScreenyScaleFilter,
 		}))
 		slog.Info("Registered Screeny external app provider", "url", cfg.ScreenyStudioURL, "scaleFilter", cfg.ScreenyScaleFilter)
+	}
+
+	// Awtrix Settings from DB or env
+	if val, err := s.getSetting("awtrix_url"); err == nil && val != "" {
+		cfg.AwtrixURL = val
+	}
+	if val, err := s.getSetting("awtrix_scale_filter"); err == nil && val != "" {
+		cfg.AwtrixScaleFilter = val
+	}
+	if cfg.AwtrixURL != "" {
+		s.RegisterExternalProvider(awtrix.NewAdapter(awtrix.AdapterConfig{
+			BaseURL:     cfg.AwtrixURL,
+			FPS:         cfg.AwtrixFPS,
+			ScaleFilter: cfg.AwtrixScaleFilter,
+		}))
+		slog.Info("Registered Awtrix external app provider", "url", cfg.AwtrixURL, "scaleFilter", cfg.AwtrixScaleFilter)
 	}
 
 	// Load OIDC settings from DB
@@ -399,6 +416,7 @@ func (s *Server) routes() {
 	s.Router.HandleFunc("POST /settings/system-apps-auto-refresh", s.RequireLogin(s.handleSetSystemAppsAutoRefresh))
 	s.Router.HandleFunc("POST /update_firmware", s.RequireLogin(s.handleUpdateFirmware))
 	s.Router.HandleFunc("POST /settings/screeny", s.RequireLogin(s.handleSetScreenyConfig))
+	s.Router.HandleFunc("POST /settings/awtrix", s.RequireLogin(s.handleSetAwtrixConfig))
 
 	// App broken status (development only)
 	s.Router.HandleFunc("POST /mark_app_broken", s.RequireLogin(s.handleMarkAppBroken))
@@ -545,6 +563,38 @@ func (s *Server) updateScreenyConfig(studioURL, scaleFilter string) error {
 		delete(s.externalProviders, "screeny")
 		s.externalProvidersMu.Unlock()
 		slog.Info("Deregistered Screeny external app provider")
+	}
+	return nil
+}
+
+// updateAwtrixConfig updates Awtrix settings in the DB and running server.
+func (s *Server) updateAwtrixConfig(awtrixURL, scaleFilter string) error {
+	cleanURL := strings.TrimRight(strings.TrimSpace(awtrixURL), "/")
+	s.Config.AwtrixURL = cleanURL
+	if scaleFilter != "" {
+		s.Config.AwtrixScaleFilter = scaleFilter
+	}
+	if err := s.setSetting("awtrix_url", s.Config.AwtrixURL); err != nil {
+		return err
+	}
+	if err := s.setSetting("awtrix_scale_filter", s.Config.AwtrixScaleFilter); err != nil {
+		return err
+	}
+
+	if s.Config.AwtrixURL != "" {
+		adapter := awtrix.NewAdapter(awtrix.AdapterConfig{
+			BaseURL:     s.Config.AwtrixURL,
+			FPS:         s.Config.AwtrixFPS,
+			ScaleFilter: s.Config.AwtrixScaleFilter,
+		})
+		s.RegisterExternalProvider(adapter)
+		slog.Info("Updated Awtrix external app provider", "url", s.Config.AwtrixURL, "scaleFilter", s.Config.AwtrixScaleFilter)
+		go s.preheatExternalAppThumbnails()
+	} else {
+		s.externalProvidersMu.Lock()
+		delete(s.externalProviders, "awtrix")
+		s.externalProvidersMu.Unlock()
+		slog.Info("Deregistered Awtrix external app provider")
 	}
 	return nil
 }
