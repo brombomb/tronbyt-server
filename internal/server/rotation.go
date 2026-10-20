@@ -67,26 +67,35 @@ func (s *Server) GetNextAppImageHTTP(ctx context.Context, device *data.Device, u
 
 		if activeApp != nil && activeApp.Enabled && IsAppScheduleActive(activeApp, device) {
 			chunks := s.getAppChunks(device.ID, activeApp)
+			maxChunkSize := s.GetMaxChunkSizeForDevice(device)
 			if len(chunks) > 1 && currIdx < len(chunks) {
 				chunk := chunks[currIdx]
-				dwell := max(1, chunk.DurationMs/1000)
-
-				s.deviceChunkMu.Lock()
-				nextIdx := currIdx + 1
-				if nextIdx >= len(chunks) {
-					// Last chunk reached; clear tracking so the next /next request rotates to the next app
+				if maxChunkSize > 0 && len(chunk.WebPBytes) > maxChunkSize {
+					slog.Warn("HTTP chunk exceeds device max buffer size, aborting multi-chunk sequence", "device", device.ID, "app", activeApp.Iname, "chunk_size", len(chunk.WebPBytes), "max", maxChunkSize)
+					s.deviceChunkMu.Lock()
 					delete(s.deviceCurrentChunkApp, device.ID)
 					delete(s.deviceChunkIndices, device.ID)
+					s.deviceChunkMu.Unlock()
 				} else {
-					s.deviceChunkIndices[device.ID] = nextIdx
+					dwell := max(1, chunk.DurationMs/1000)
+
+					s.deviceChunkMu.Lock()
+					nextIdx := currIdx + 1
+					if nextIdx >= len(chunks) {
+						// Last chunk reached; clear tracking so the next /next request rotates to the next app
+						delete(s.deviceCurrentChunkApp, device.ID)
+						delete(s.deviceChunkIndices, device.ID)
+					} else {
+						s.deviceChunkIndices[device.ID] = nextIdx
+					}
+					s.deviceChunkMu.Unlock()
+
+					now := time.Now()
+					_, _ = gorm.G[data.Device](s.DB).Where("id = ?", device.ID).Select("LastSeen").Updates(ctx, data.Device{LastSeen: &now})
+					device.LastSeen = &now
+
+					return chunk.WebPBytes, activeApp, dwell, nil
 				}
-				s.deviceChunkMu.Unlock()
-
-				now := time.Now()
-				_, _ = gorm.G[data.Device](s.DB).Where("id = ?", device.ID).Select("LastSeen").Updates(ctx, data.Device{LastSeen: &now})
-				device.LastSeen = &now
-
-				return chunk.WebPBytes, activeApp, dwell, nil
 			}
 		}
 
@@ -105,12 +114,13 @@ func (s *Server) GetNextAppImageHTTP(ctx context.Context, device *data.Device, u
 	}
 
 	chunks := s.getAppChunks(device.ID, app)
-	if len(chunks) > 1 {
-		s.deviceChunkMu.Lock()
-		s.deviceCurrentChunkApp[device.ID] = app.Iname
-		s.deviceChunkIndices[device.ID] = 1 // chunk 0 is returned now; chunk 1 is next
-		s.deviceChunkMu.Unlock()
-
+	if len(chunks) > 0 {
+		if len(chunks) > 1 {
+			s.deviceChunkMu.Lock()
+			s.deviceCurrentChunkApp[device.ID] = app.Iname
+			s.deviceChunkIndices[device.ID] = 1 // chunk 0 is returned now; chunk 1 is next
+			s.deviceChunkMu.Unlock()
+		}
 		chunk0 := chunks[0]
 		dwell := max(1, chunk0.DurationMs/1000)
 		return chunk0.WebPBytes, app, dwell, nil
@@ -249,6 +259,21 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 		slog.Error("Failed to read app image", "path", webpPath, "error", err)
 		return getDefaultImage()
 	}
+
+	// Guard against oversized images for the device (e.g. cached files from before multi-chunk capping)
+	maxChunkSize := s.GetMaxChunkSizeForDevice(device)
+	if maxChunkSize > 0 && len(data) > maxChunkSize {
+		// Attempt fallback to chunk 0 if multi-chunk exists and fits
+		if chunks := s.getAppChunks(device.ID, app); len(chunks) > 0 && len(chunks[0].WebPBytes) <= maxChunkSize {
+			slog.Warn("Primary webp exceeds device max chunk size; serving chunk 0 instead",
+				"device", device.ID, "app", app.Iname, "primary_size", len(data), "chunk0_size", len(chunks[0].WebPBytes), "max", maxChunkSize)
+			return chunks[0].WebPBytes, app, nil
+		}
+		slog.Error("App image exceeds device max buffer size and no valid chunk found",
+			"device", device.ID, "app", app.Iname, "size", len(data), "max", maxChunkSize)
+		return getDefaultImage()
+	}
+
 	return data, app, err
 }
 

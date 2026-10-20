@@ -799,6 +799,18 @@ func (s *Server) handleConfigAppPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Invalidate chunk cache and current device chunk playback for this app
+	s.invalidateAppChunks(device.ID, app.Iname)
+	s.deviceChunkMu.Lock()
+	if s.deviceCurrentChunkApp[device.ID] == app.Iname {
+		delete(s.deviceCurrentChunkApp, device.ID)
+		delete(s.deviceChunkIndices, device.ID)
+	}
+	s.deviceChunkMu.Unlock()
+
+	// Force render by resetting LastRender before saving to DB
+	app.LastRender = time.Time{}
+
 	// Save to DB
 	if err := s.DB.Save(app).Error; err != nil {
 		slog.Error("Failed to save app config", "error", err)
@@ -807,8 +819,6 @@ func (s *Server) handleConfigAppPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Trigger Render
-	// Force render by resetting LastRender
-	app.LastRender = time.Time{}
 	if app.Path != nil && s.isExternalAppPath(*app.Path) {
 		s.backgroundRenders.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -882,10 +892,21 @@ func (s *Server) handleCurrentApp(w http.ResponseWriter, r *http.Request) {
 	// The device and user are already in context due to RequireLogin and RequireDevice
 	device := GetDevice(r)
 
-	imgData, _, err := s.GetCurrentAppImage(r.Context(), device)
+	imgData, app, err := s.GetCurrentAppImage(r.Context(), device)
 	if err != nil {
 		s.sendDefaultImage(w, r, device)
 		return
+	}
+
+	// For external apps with multi-chunk animations, serve the full animation to the browser if available
+	if app != nil && app.Path != nil && s.isExternalAppPath(*app.Path) {
+		deviceWebpDir, err := s.ensureDeviceImageDir(device.ID)
+		if err == nil {
+			fullPath := filepath.Join(deviceWebpDir, fmt.Sprintf("%s-%s_full.webp", app.Name, app.Iname))
+			if fullBytes, err := os.ReadFile(fullPath); err == nil && len(fullBytes) > 0 {
+				imgData = fullBytes
+			}
+		}
 	}
 
 	h := sha256.Sum256(imgData)
@@ -966,7 +987,7 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 			if dwellSecs <= 0 {
 				dwellSecs = 10
 			}
-			previewDurationMs := min(max(dwellSecs*1000, 5000), 15000)
+			previewDurationMs := min(max(dwellSecs*1000, 5000), 60000)
 			req := providers.RenderRequest{
 				AppID:        appID,
 				Width:        width,
@@ -1024,37 +1045,23 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 	if app.Path != nil && s.isExternalAppPath(*app.Path) {
 		provider, appID, ok := s.parseExternalAppPath(*app.Path)
 		if ok {
-			// First check if app already has rendered chunks (only if successfully rendered previously)
-			if !app.LastRender.IsZero() {
-				deviceWebpDir, err := s.ensureDeviceImageDir(device.ID)
-				if err == nil {
-					primaryPath := s.getAppWebpPath(deviceWebpDir, app)
-					if b, err := os.ReadFile(primaryPath); err == nil && len(b) > 0 {
-						s.serveThumbnailBytes(w, r, b)
-						return
-					}
-				}
-				if existing := s.getAppChunks(device.ID, app); len(existing) > 0 {
-					if len(existing[0].FullWebPBytes) > 0 {
-						s.serveThumbnailBytes(w, r, existing[0].FullWebPBytes)
-						return
-					}
-					if len(existing[0].WebPBytes) > 0 {
-						s.serveThumbnailBytes(w, r, existing[0].WebPBytes)
-						return
-					}
+			deviceWebpDir, err := s.ensureDeviceImageDir(device.ID)
+			var fullPath string
+			if err == nil {
+				fullPath = filepath.Join(deviceWebpDir, fmt.Sprintf("%s-%s_full.webp", app.Name, app.Iname))
+				if b, err := os.ReadFile(fullPath); err == nil && len(b) > 0 {
+					s.serveThumbnailBytes(w, r, b)
+					return
 				}
 			}
 
-			// Second check if we have a thumbnail cached on disk
-			cacheDir := s.ensureCleanPreviewCache(provider.Name())
-			cacheFile := filepath.Join(cacheDir, appID+".webp")
-			if b, err := os.ReadFile(cacheFile); err == nil && len(b) > 0 {
-				s.serveThumbnailBytes(w, r, b)
+			// If existing in-memory chunks have FullWebPBytes, serve it directly
+			if existing := s.getAppChunks(device.ID, app); len(existing) > 0 && len(existing[0].FullWebPBytes) > 0 {
+				s.serveThumbnailBytes(w, r, existing[0].FullWebPBytes)
 				return
 			}
 
-			// Third, render on-demand with saved app.Config
+			// Render on-demand with saved app.Config for the full dwell time window
 			width, height := device.Type.CanvasSize()
 			if device.Type.Supports2x() {
 				width *= 2
@@ -1071,14 +1078,14 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 			if dwellSecs <= 0 {
 				dwellSecs = 10
 			}
-			previewDurationMs := min(max(dwellSecs*1000, 5000), 15000)
+			previewDurationMs := min(max(dwellSecs*1000, 5000), 60000)
 			req := providers.RenderRequest{
 				AppID:        appID,
 				Width:        width,
 				Height:       height,
 				FPS:          fps,
 				DurationMs:   previewDurationMs,
-				MaxChunkSize: 0,
+				MaxChunkSize: 0, // Unchunked for full browser preview
 				Timezone:     device.GetTimezone(),
 				Config:       app.Config,
 			}
@@ -1090,7 +1097,9 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 				if len(chunks[0].FullWebPBytes) > 0 {
 					previewBytes = chunks[0].FullWebPBytes
 				}
-				_ = os.WriteFile(cacheFile, previewBytes, 0644)
+				if fullPath != "" {
+					_ = os.WriteFile(fullPath, previewBytes, 0644)
+				}
 				s.serveThumbnailBytes(w, r, previewBytes)
 				return
 			}
@@ -1203,16 +1212,18 @@ func (s *Server) handlePushPreview(w http.ResponseWriter, r *http.Request) {
 		if dwellSecs <= 0 {
 			dwellSecs = 5
 		}
-		previewDurationMs := min(max(dwellSecs*1000, 5000), 10000)
+		previewDurationMs := min(max(dwellSecs*1000, 5000), 60000)
+		maxChunkDurationMs := s.GetMaxChunkDurationForDevice(device)
 		req := providers.RenderRequest{
-			AppID:        appID,
-			Width:        width,
-			Height:       height,
-			FPS:          fps,
-			DurationMs:   previewDurationMs,
-			MaxChunkSize: maxChunkSize,
-			Timezone:     device.GetTimezone(),
-			Config:       previewConfig,
+			AppID:              appID,
+			Width:              width,
+			Height:             height,
+			FPS:                fps,
+			DurationMs:         previewDurationMs,
+			MaxChunkSize:       maxChunkSize,
+			MaxChunkDurationMs: maxChunkDurationMs,
+			Timezone:           device.GetTimezone(),
+			Config:             previewConfig,
 		}
 		chunks, err := provider.RenderAppChunks(r.Context(), req)
 		if err != nil || len(chunks) == 0 {
@@ -1220,12 +1231,35 @@ func (s *Server) handlePushPreview(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Render failed", http.StatusInternalServerError)
 			return
 		}
-		imgBytes := chunks[0].WebPBytes
-		if err := s.savePushedImage(device.ID, app.Iname, "", imgBytes); err != nil {
-			http.Error(w, "Failed to push preview", http.StatusInternalServerError)
-			return
+
+		// Save app chunks to disk and cache so _full.webp exists for browser preview,
+		// and chunk_*.webp exist for hardware playback.
+		if err := s.saveAppChunks(device.ID, app, chunks); err != nil {
+			slog.Error("Failed to save app chunks on push preview", "device", device.ID, "app", app.Iname, "error", err)
 		}
-		s.Broadcaster.Notify(device.ID, imgBytes)
+
+		// Fallback for HTTP device polling: save primary image
+		primaryBytes := chunks[0].WebPBytes
+		if len(chunks[0].FullWebPBytes) > 0 && len(chunks[0].FullWebPBytes) <= maxChunkSize {
+			primaryBytes = chunks[0].FullWebPBytes
+		}
+		if err := s.savePushedImage(device.ID, app.Iname, "", primaryBytes); err != nil {
+			slog.Warn("Failed to save pushed fallback image", "error", err)
+		}
+
+		// If multi-chunk and device is polling HTTP /next, set active chunk sequence
+		if len(chunks) > 1 {
+			s.deviceChunkMu.Lock()
+			s.deviceCurrentChunkApp[device.ID] = app.Iname
+			s.deviceChunkIndices[device.ID] = 0
+			s.deviceChunkMu.Unlock()
+		}
+
+		// Stream preview to WebSocket device
+		s.Broadcaster.Notify(device.ID, DevicePreviewMessage{
+			App:    app,
+			Chunks: chunks,
+		})
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -1296,13 +1330,26 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		slog.Error("Failed to get device webp directory for app delete cleanup", "device_id", device.ID, "error", err)
 		// Don't error out the request if file cleanup fails, but log it
 	} else {
-		matches, _ := filepath.Glob(filepath.Join(webpDir, fmt.Sprintf("*-%s.webp", app.Iname)))
+		matches, _ := filepath.Glob(filepath.Join(webpDir, fmt.Sprintf("*-%s*.webp", app.Iname)))
 		for _, match := range matches {
 			if err := os.Remove(match); err != nil {
 				slog.Error("Failed to remove app webp file", "path", match, "error", err)
 			}
 		}
+		chunkMetaMatches, _ := filepath.Glob(filepath.Join(webpDir, fmt.Sprintf("*-%s_chunks.json", app.Iname)))
+		for _, match := range chunkMetaMatches {
+			_ = os.Remove(match)
+		}
 	}
+
+	// Invalidate chunk cache and current device chunk playback for this app
+	s.invalidateAppChunks(device.ID, app.Iname)
+	s.deviceChunkMu.Lock()
+	if s.deviceCurrentChunkApp[device.ID] == app.Iname {
+		delete(s.deviceCurrentChunkApp, device.ID)
+		delete(s.deviceChunkIndices, device.ID)
+	}
+	s.deviceChunkMu.Unlock()
 
 	// Notify Dashboard
 	// We need the user to notify. GetUser(r) gets it from context.

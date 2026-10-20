@@ -18,14 +18,15 @@ type RenderChunk struct {
 
 // RenderRequest specifies the rendering parameters for an external app.
 type RenderRequest struct {
-	AppID        string
-	Width        int
-	Height       int
-	FPS          int
-	DurationMs   int
-	MaxChunkSize int // e.g., 5MB (5242880) for tronberry/RPi, 460KB (471040) for ESP32
-	Timezone     string
-	Config       map[string]any
+	AppID              string
+	Width              int
+	Height             int
+	FPS                int
+	DurationMs         int
+	MaxChunkSize       int // e.g., 5MB (5242880) for tronberry/RPi, 450KB for S3/Wide, 200KB (200000) for Gen 1
+	MaxChunkDurationMs int // Maximum duration in ms per chunk (e.g. 5000ms for ESP32 devices)
+	Timezone           string
+	Config             map[string]any
 }
 
 // ExternalAppMeta describes metadata for an external provider's app.

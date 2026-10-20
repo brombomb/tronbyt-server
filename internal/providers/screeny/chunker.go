@@ -50,8 +50,8 @@ func EncodeFramesToWebP(frames []*image.RGBA, frameDuration time.Duration) ([]by
 }
 
 // SplitFramesIntoChunks partitions sequential frames into animated WebP chunks,
-// each fitting under maxChunkSize bytes with exact playback DurationMs.
-func SplitFramesIntoChunks(frames []*image.RGBA, fps int, maxChunkSize int) ([]providers.RenderChunk, error) {
+// each fitting under maxChunkSize bytes and maxChunkDurationMs with exact playback DurationMs.
+func SplitFramesIntoChunks(frames []*image.RGBA, fps int, maxChunkSize int, maxChunkDurationMs int) ([]providers.RenderChunk, error) {
 	if len(frames) == 0 {
 		return nil, errors.New("no frames to split")
 	}
@@ -78,9 +78,14 @@ func SplitFramesIntoChunks(frames []*image.RGBA, fps int, maxChunkSize int) ([]p
 		}, nil
 	}
 
-	// 2. Try encoding the entire animation in one chunk first.
+	maxFramesPerChunk := 0
+	if maxChunkDurationMs > 0 {
+		maxFramesPerChunk = (maxChunkDurationMs * fps) / 1000
+	}
+
+	// 2. Try encoding the entire animation in one chunk first if it fits within bounds.
 	allBytes, err := EncodeFramesToWebP(frames, frameDuration)
-	if err == nil && len(allBytes) <= maxChunkSize {
+	if err == nil && len(allBytes) <= maxChunkSize && (maxFramesPerChunk <= 0 || len(frames) <= maxFramesPerChunk) {
 		return []providers.RenderChunk{
 			{
 				WebPBytes:     allBytes,
@@ -91,14 +96,18 @@ func SplitFramesIntoChunks(frames []*image.RGBA, fps int, maxChunkSize int) ([]p
 	}
 
 	// 3. Multi-chunk splitting:
-	// Binary-search the maximum number of frames that fit within maxChunkSize for each chunk.
+	// Binary-search the maximum number of frames (up to maxFramesPerChunk and maxChunkSize) for each chunk.
 	var chunks []providers.RenderChunk
 	start := 0
 	totalFrames := len(frames)
 
 	for start < totalFrames {
+		maxEnd := totalFrames
+		if maxFramesPerChunk > 0 && start+maxFramesPerChunk < totalFrames {
+			maxEnd = start + maxFramesPerChunk
+		}
 		low := start + 1
-		high := totalFrames
+		high := maxEnd
 		bestEnd := low
 		var bestBytes []byte
 

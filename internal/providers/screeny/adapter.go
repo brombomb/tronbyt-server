@@ -215,9 +215,6 @@ func (a *ScreenyAdapter) RenderAppChunks(ctx context.Context, req providers.Rend
 	}
 
 	maxChunkSize := req.MaxChunkSize
-	if maxChunkSize <= 0 {
-		maxChunkSize = a.maxWebPBytes
-	}
 
 	// 1. Activate the target patch in screeny-studio
 	if err := a.activatePatch(ctx, req.AppID); err != nil {
@@ -252,7 +249,7 @@ func (a *ScreenyAdapter) RenderAppChunks(ctx context.Context, req providers.Rend
 	}
 
 	// 4. Split captured frames into animated WebP chunks
-	return SplitFramesIntoChunks(frames, fps, maxChunkSize)
+	return SplitFramesIntoChunks(frames, fps, maxChunkSize, req.MaxChunkDurationMs)
 }
 
 // fetchBootstrap calls GET /api/v1/bootstrap on screeny-studio.
@@ -435,8 +432,14 @@ func parseParamValue(val any) (float32, bool) {
 		return v, true
 	case int:
 		return float32(v), true
+	case int32:
+		return float32(v), true
 	case int64:
 		return float32(v), true
+	case json.Number:
+		if parsed, err := v.Float64(); err == nil {
+			return float32(parsed), true
+		}
 	case bool:
 		if v {
 			return 1.0, true

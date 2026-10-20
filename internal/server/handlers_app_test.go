@@ -925,7 +925,7 @@ func TestExternalAppConfigPreview_FullAnimationServing(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, fullAnimationBytes, rr.Body.Bytes(), "Must serve complete unchunked animation for browser preview")
 
-	// Save app chunks and verify primaryPath contains full animation while chunks contain individual pieces
+	// Save app chunks and verify primaryPath contains chunk 0 (safe for device) and _full.webp contains full animation
 	require.NoError(t, s.saveAppChunks(device.ID, &app, chunks))
 
 	deviceWebpDir, err := s.ensureDeviceImageDir(device.ID)
@@ -933,7 +933,12 @@ func TestExternalAppConfigPreview_FullAnimationServing(t *testing.T) {
 	primaryPath := s.getAppWebpPath(deviceWebpDir, &app)
 	savedPrimary, err := os.ReadFile(primaryPath)
 	require.NoError(t, err)
-	assert.Equal(t, fullAnimationBytes, savedPrimary, "primary webp must contain complete animation")
+	assert.Equal(t, dummyChunkWebP1, savedPrimary, "primary webp must contain chunk 0 safe for device")
+
+	fullPath := filepath.Join(deviceWebpDir, "Clock Full-testapp_full_full.webp")
+	savedFull, err := os.ReadFile(fullPath)
+	require.NoError(t, err)
+	assert.Equal(t, fullAnimationBytes, savedFull, "_full.webp must contain complete animation for browser")
 
 	// Verify getAppChunks still yields the individual hardware chunks
 	loadedChunks := s.getAppChunks(device.ID, &app)

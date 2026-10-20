@@ -154,7 +154,31 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 		if uinterval <= 0 {
 			uinterval = 10
 		}
-		if forceRender || time.Since(app.LastRender) > time.Duration(uinterval)*time.Minute {
+		maxChunkSize := s.GetMaxChunkSizeForDevice(device)
+		needsRechunk := false
+		if maxChunkSize > 0 && device != nil {
+			deviceWebpDir, err := s.ensureDeviceImageDir(device.ID)
+			if err == nil {
+				primaryPath := s.getAppWebpPath(deviceWebpDir, app)
+				if fi, err := os.Stat(primaryPath); err == nil && fi.Size() > int64(maxChunkSize) {
+					needsRechunk = true
+					slog.Info("Cached external app primary image exceeds device max chunk size; forcing re-render",
+						"app", appBasename, "size", fi.Size(), "max", maxChunkSize)
+				}
+			}
+			if !needsRechunk {
+				for _, ch := range s.getAppChunks(device.ID, app) {
+					if len(ch.WebPBytes) > maxChunkSize {
+						needsRechunk = true
+						slog.Info("Cached external app chunk exceeds device max chunk size; forcing re-render",
+							"app", appBasename, "chunk_size", len(ch.WebPBytes), "max", maxChunkSize)
+						break
+					}
+				}
+			}
+		}
+
+		if forceRender || needsRechunk || time.Since(app.LastRender) > time.Duration(uinterval)*time.Minute {
 			slog.Info("Rendering external app", "provider", provider.Name(), "app", appBasename)
 			startTime := time.Now()
 
@@ -171,17 +195,18 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 			if device != nil {
 				dwellSecs = device.GetEffectiveDwellTime(app)
 			}
-			maxChunkSize := s.GetMaxChunkSizeForDevice(device)
+			maxChunkDurationMs := s.GetMaxChunkDurationForDevice(device)
 
 			req := providers.RenderRequest{
-				AppID:        appID,
-				Width:        width,
-				Height:       height,
-				FPS:          s.Config.ScreenyFPS,
-				DurationMs:   dwellSecs * 1000,
-				MaxChunkSize: maxChunkSize,
-				Timezone:     device.GetTimezone(),
-				Config:       app.Config,
+				AppID:              appID,
+				Width:              width,
+				Height:             height,
+				FPS:                s.Config.ScreenyFPS,
+				DurationMs:         dwellSecs * 1000,
+				MaxChunkSize:       maxChunkSize,
+				MaxChunkDurationMs: maxChunkDurationMs,
+				Timezone:           device.GetTimezone(),
+				Config:             app.Config,
 			}
 
 			chunks, err := provider.RenderAppChunks(ctx, req)
@@ -197,8 +222,8 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 				app.LastRenderDur = renderDur
 				app.EmptyLastRender = true
 
-				// Graceful fallback: check if we have previously cached chunks
-				if existing := s.getAppChunks(device.ID, app); len(existing) > 0 {
+				// Graceful fallback: check if we have previously cached chunks that fit within maxChunkSize
+				if existing := s.getAppChunks(device.ID, app); len(existing) > 0 && (maxChunkSize <= 0 || len(existing[0].WebPBytes) <= maxChunkSize) {
 					slog.Warn("Reusing previously cached chunk(s) for unreachable external app", "app", appBasename)
 					return true
 				}

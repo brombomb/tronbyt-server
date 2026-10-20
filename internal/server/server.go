@@ -571,9 +571,13 @@ func (s *Server) parseExternalAppPath(path string) (providers.ExternalAppProvide
 // GetMaxChunkSizeForDevice returns the chunk size budget based on device type.
 func (s *Server) GetMaxChunkSizeForDevice(device *data.Device) int {
 	if device == nil {
-		return s.Config.ScreenyMaxWebPBytes
+		if s.Config.ScreenyMaxWebPBytesESP > 0 {
+			return s.Config.ScreenyMaxWebPBytesESP
+		}
+		return 160000
 	}
-	// Raspberry Pi / Tronberry clients have expanded memory capabilities.
+
+	// 1. Raspberry Pi / Tronberry clients have expanded Linux memory capabilities (default: 5 MB).
 	if device.Type == data.DeviceRaspberryPi ||
 		device.Type == data.DeviceRaspberryPiWide ||
 		device.Type == data.DeviceRaspberryPiSquare ||
@@ -583,11 +587,56 @@ func (s *Server) GetMaxChunkSizeForDevice(device *data.Device) int {
 		}
 		return s.Config.ScreenyMaxWebPBytes
 	}
-	// ESP32 devices have constrained RAM (default 460 KB).
+
+	// 2. Pixoticker has an ultra-compact memory buffer (60,000 bytes in firmware).
+	if device.Type == data.DevicePixoticker {
+		return 50000
+	}
+
+	// 3. ESP32-S3 and Wide devices (Matrix Wide, Tronbyt S3 Wide, MatrixPortal S3, Tidbyt Gen 2)
+	// have larger 460,000-byte firmware buffers and expanded PSRAM/SRAM.
+	if device.Type == data.DeviceTronbytS3Wide ||
+		device.Type == data.DeviceMatrixPortalWide ||
+		device.Type == data.DeviceMatrixPortalSquare ||
+		device.Type == data.DeviceTronbytS3 ||
+		device.Type == data.DeviceMatrixPortal ||
+		device.Type == data.DeviceWaveshareS3 ||
+		device.Type == data.DeviceTidbytGen2 {
+		return 450000
+	}
+
+	// 4. Tidbyt Gen 1 and Waveshare MatrixPortal have classic ESP32 chips with strict heap constraints.
+	// 160,000 bytes (160 KB) is the safe maximum chunk size that accommodates double-buffering
+	// without heap fragmentation or buffer overflow (chunks near 200 KB cause heap exhaustion).
 	if s.Config.ScreenyMaxWebPBytesESP > 0 {
 		return s.Config.ScreenyMaxWebPBytesESP
 	}
-	return 471040
+	return 160000
+}
+
+// GetMaxChunkDurationForDevice returns the maximum duration in ms per chunk based on device type.
+// For ESP32-based devices (e.g. Tidbyt Gen1/Gen2, Tronbyt S3, MatrixPortal), large WebPs with
+// hundreds of frames overwhelm the hardware demuxer and memory. Capping chunks at 5000ms (5s)
+// ensures smooth sequential playback without device buffer exhaustion.
+// For Raspberry Pi / Tronberry devices, 0 is returned (no duration limit).
+func (s *Server) GetMaxChunkDurationForDevice(device *data.Device) int {
+	if device == nil {
+		return 5000
+	}
+	if device.Type == data.DeviceRaspberryPi ||
+		device.Type == data.DeviceRaspberryPiWide ||
+		device.Type == data.DeviceRaspberryPiSquare ||
+		strings.EqualFold(device.Info.FirmwareType, "Tronberry") {
+		return 0
+	}
+	return 5000
+}
+
+func (s *Server) invalidateAppChunks(deviceID string, iname string) {
+	key := s.getAppChunksCacheKey(deviceID, iname)
+	s.appChunksMu.Lock()
+	delete(s.appChunksCache, key)
+	s.appChunksMu.Unlock()
 }
 
 type chunkMeta struct {
@@ -676,16 +725,28 @@ func (s *Server) saveAppChunks(deviceID string, app *data.App, chunks []provider
 	}
 	appBasename := fmt.Sprintf("%s-%s", app.Name, app.Iname)
 
-	// Save the complete unchunked animation for full web previews and dashboard display.
-	// If FullWebPBytes is provided on chunk 0, use it so browser previews play the full duration
-	// across all chunks. Otherwise fallback to chunks[0].WebPBytes.
+	// Remove old chunk files for this app to prevent orphaned chunks if chunk count changed
+	oldChunks, _ := filepath.Glob(filepath.Join(deviceWebpDir, fmt.Sprintf("%s_chunk_*.webp", appBasename)))
+	for _, oldChunk := range oldChunks {
+		_ = os.Remove(oldChunk)
+	}
+
+	// The primary image (<appBasename>.webp) is what devices fetch on rotation or fallback.
+	// It must always be safe for device hardware and stay within maxChunkSize, so we
+	// write chunk 0 (the first chunk) to primaryPath.
 	primaryPath := s.getAppWebpPath(deviceWebpDir, app)
 	primaryBytes := chunks[0].WebPBytes
-	if len(chunks[0].FullWebPBytes) > 0 {
-		primaryBytes = chunks[0].FullWebPBytes
-	}
 	if err := os.WriteFile(primaryPath, primaryBytes, 0644); err != nil {
 		return err
+	}
+
+	// Save the complete unchunked animation (if available) to <appBasename>_full.webp
+	// for rich web previews and dashboard display.
+	if len(chunks[0].FullWebPBytes) > 0 {
+		fullPath := filepath.Join(deviceWebpDir, fmt.Sprintf("%s_full.webp", appBasename))
+		if err := os.WriteFile(fullPath, chunks[0].FullWebPBytes, 0644); err != nil {
+			slog.Error("Failed to write full webp preview file", "path", fullPath, "error", err)
+		}
 	}
 
 	// If multiple chunks, write individual chunk files and chunk metadata JSON

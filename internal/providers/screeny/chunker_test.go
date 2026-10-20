@@ -36,7 +36,7 @@ func TestChunker_SingleChunk_HighCapacity(t *testing.T) {
 	frames := generateRandomFrames(60, 64, 32, 42)
 	maxChunkSize := 5 * 1024 * 1024 // 5 MB for Tronberry / Raspberry Pi
 
-	chunks, err := SplitFramesIntoChunks(frames, 30, maxChunkSize)
+	chunks, err := SplitFramesIntoChunks(frames, 30, maxChunkSize, 0)
 	require.NoError(t, err)
 	require.Len(t, chunks, 1, "should fit in a single chunk under 5MB")
 
@@ -59,7 +59,7 @@ func TestChunker_MultiChunk_Constrained(t *testing.T) {
 	maxChunkSize := len(fullBytes) / 3
 	require.Greater(t, maxChunkSize, 500, "chunk size budget should be reasonable")
 
-	chunks, err := SplitFramesIntoChunks(frames, 30, maxChunkSize)
+	chunks, err := SplitFramesIntoChunks(frames, 30, maxChunkSize, 0)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(chunks), 3, "should split into at least 3 chunks")
 
@@ -76,16 +76,16 @@ func TestChunker_MultiChunk_Constrained(t *testing.T) {
 }
 
 func TestChunker_ESP32_Constraint(t *testing.T) {
-	// For ESP32, default limit is 460 KB (471,040 bytes)
-	const esp32MaxBytes = 471040
+	// For ESP32 Gen 1, default limit is 200 KB (200,000 bytes)
+	const esp32MaxBytes = 200000
 
-	// 30 frames fits well within 460 KB
-	frames := generateRandomFrames(30, 64, 32, 123)
-	chunks, err := SplitFramesIntoChunks(frames, 30, esp32MaxBytes)
+	// 25 random noise frames fit within 200 KB
+	frames := generateRandomFrames(25, 64, 32, 123)
+	chunks, err := SplitFramesIntoChunks(frames, 30, esp32MaxBytes, 0)
 	require.NoError(t, err)
 	require.Len(t, chunks, 1)
 	assert.LessOrEqual(t, len(chunks[0].WebPBytes), esp32MaxBytes)
-	assert.Equal(t, 30*33, chunks[0].DurationMs)
+	assert.Equal(t, 25*33, chunks[0].DurationMs)
 	assert.NotEmpty(t, chunks[0].FullWebPBytes)
 }
 
@@ -96,9 +96,24 @@ func TestChunker_FullWebPBytes(t *testing.T) {
 	require.NoError(t, err)
 
 	maxChunkSize := len(fullBytes) / 3
-	chunks, err := SplitFramesIntoChunks(frames, 30, maxChunkSize)
+	chunks, err := SplitFramesIntoChunks(frames, 30, maxChunkSize, 0)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(chunks), 3)
 
 	assert.Equal(t, fullBytes, chunks[0].FullWebPBytes, "chunks[0].FullWebPBytes must match complete unchunked animation")
+}
+
+func TestChunker_DurationConstraint(t *testing.T) {
+	// 90 frames at 30 fps = 3000ms. Split with maxChunkDurationMs = 1000ms (30 frames per chunk)
+	frames := generateRandomFrames(90, 64, 32, 77)
+	maxChunkSize := 5 * 1024 * 1024 // Large byte budget, duration constraint takes precedence
+
+	chunks, err := SplitFramesIntoChunks(frames, 30, maxChunkSize, 1000)
+	require.NoError(t, err)
+	require.Len(t, chunks, 3, "should split into 3 chunks of 1 second each")
+
+	for i, chunk := range chunks {
+		assert.Equal(t, 30*33, chunk.DurationMs, "chunk %d duration should be exactly 30 frames * 33ms", i)
+	}
+	assert.NotEmpty(t, chunks[0].FullWebPBytes)
 }

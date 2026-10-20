@@ -885,20 +885,22 @@
         case "text":
           inputElement = document.createElement("input");
           inputElement.type = field.secret ? "password" : "text";
-          inputElement.value = config[field.id] || field.default || "";
+          const textHasVal = config[field.id] !== undefined && config[field.id] !== null && config[field.id] !== "";
+          inputElement.value = textHasVal ? config[field.id] : (field.default || "");
           inputElement.className = "form-control";
           // Save the default shown in the box, as dropdown and datetime do; otherwise
           // it's only saved once edited, and the app receives an empty value.
-          if (!config[field.id] && field.default) {
+          if (!textHasVal && field.default !== undefined && field.default !== null) {
             config[field.id] = field.default;
           }
           break;
         case "color":
           inputElement = document.createElement("input");
           inputElement.type = "color";
-          inputElement.value = config[field.id] || field.default || "#000000";
+          const colorHasVal = config[field.id] !== undefined && config[field.id] !== null && config[field.id] !== "";
+          inputElement.value = colorHasVal ? config[field.id] : (field.default || "#000000");
           inputElement.className = "form-control form-control-color";
-          if (!config[field.id] && field.default) {
+          if (!colorHasVal && field.default !== undefined && field.default !== null) {
             config[field.id] = field.default;
           }
           if (field.palette) {
@@ -909,8 +911,8 @@
         case "onoff":
           inputElement = document.createElement("input");
           inputElement.type = "checkbox";
-          const val = config[field.id];
-          const isChecked = val === "true" || val === true || (!val && field.default === "true");
+          const rawOnOff = config[field.id];
+          const isChecked = rawOnOff === "true" || rawOnOff === true || ((rawOnOff === undefined || rawOnOff === null) && (field.default === "true" || field.default === true));
           inputElement.checked = isChecked;
           inputElement.className = "form-control";
           config[field.id] = isChecked ? "true" : "false";
@@ -918,25 +920,30 @@
         case "datetime":
           inputElement = document.createElement("input");
           inputElement.type = "datetime-local";
-          inputElement.value = (config[field.id] || field.default || "").replace("Z", "");
+          const dateHasVal = config[field.id] !== undefined && config[field.id] !== null && config[field.id] !== "";
+          inputElement.value = (dateHasVal ? String(config[field.id]) : (field.default || "")).replace("Z", "");
           inputElement.className = "form-control";
-          if (!config[field.id] && field.default) {
+          if (!dateHasVal && field.default !== undefined && field.default !== null) {
             config[field.id] = field.default;
           }
           break;
         case "dropdown":
           inputElement = document.createElement("select");
           inputElement.className = "form-control";
+          let dropdownMatched = false;
           if (field.options) {
             field.options.forEach(opt => {
                const o = document.createElement("option");
                o.value = opt.value;
                o.textContent = opt.display;
-               if (config[field.id] === opt.value) o.selected = true;
+               if (config[field.id] !== undefined && config[field.id] !== null && String(config[field.id]) === String(opt.value)) {
+                 o.selected = true;
+                 dropdownMatched = true;
+               }
                inputElement.appendChild(o);
             });
           }
-          if (!config[field.id] && field.default) {
+          if (!dropdownMatched && field.default !== undefined && field.default !== null) {
               inputElement.value = field.default;
               config[field.id] = field.default;
           }
@@ -955,7 +962,8 @@
           break;
         default:
           inputElement = document.createElement("input");
-          inputElement.value = config[field.id] || "";
+          const defaultHasVal = config[field.id] !== undefined && config[field.id] !== null;
+          inputElement.value = defaultHasVal ? config[field.id] : "";
           inputElement.className = "form-control";
       }
 

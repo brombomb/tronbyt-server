@@ -112,7 +112,7 @@ The server can be configured via environment variables or `.env` file:
 *   `SCREENY_STUDIO_URL`: Base URL of a running `screeny-studio` instance (e.g. `http://screeny-studio:8787`). When set, Screeny patches are automatically discovered and badged with `[Screeny]` in the Add App catalog, translated to native Pixlet configuration forms, and rendered into 30 FPS animations.
 *   `SCREENY_FPS`: Frame rate for Screeny animations (default: `30`).
 *   `SCREENY_MAX_WEBP_BYTES`: Default maximum WebP animation chunk size in bytes (default: `5242880` / 5 MB).
-*   `SCREENY_MAX_WEBP_BYTES_ESP`: Maximum chunk size for ESP32 devices (default: `471040` / 460 KB) to fit within device RAM limits.
+*   `SCREENY_MAX_WEBP_BYTES_ESP`: Maximum chunk size for ESP32 devices (default: `160000` / 160 KB) to fit safely within device RAM and firmware buffer limits during double-buffering (on Tidbyt Gen 1). Devices with expanded 460,000-byte firmware buffers (ESP32-S3, Matrix Wide, Tronbyt S3 Wide, Gen 2) automatically utilize 450 KB (`450000` bytes), and Pixoticker uses 50 KB (`50000` bytes).
 *   `SCREENY_MAX_WEBP_BYTES_RPI`: Maximum chunk size for Raspberry Pi and Tronberry devices (default: `5242880` / 5 MB) utilizing their expanded memory capacity.
 *   `SCREENY_SCALE_FILTER`: Global 128x64 upscaling filter algorithm: `bicubic`, `scale2x`, `bilinear`, `nearest` (default: `bicubic`). Can also be customized per installed app instance in the web UI.
 *   `GITHUB_TOKEN`: GitHub token for private app repositories (optional).
@@ -133,12 +133,13 @@ Tronbyt Server supports pluggable external app providers via the `ExternalAppPro
    - Users can select their preferred filter globally via `SCREENY_SCALE_FILTER` or override it per app instance in the Tronbyt web UI app settings (automatically offered for devices that support 2x scaling, such as Tronberry / Raspberry Pi 128x64).
 4. **Multi-Chunk WebP Streaming:**
    - For high-capacity clients (Raspberry Pi / `tronberry`), animations up to 5 MB (configurable via `SCREENY_MAX_WEBP_BYTES_RPI`) stream in a single high-fidelity chunk.
-   - For memory-constrained clients (ESP32 / Tidbyt), animations exceeding 460 KB (`SCREENY_MAX_WEBP_BYTES_ESP`) are seamlessly split into sequential chunks with exact playback durations.
-   - **WebSocket (`/ws`):** Chunks stream back-to-back at exact frame duration boundaries (`DurationMs`) before rotating to the next app.
+   - For memory-constrained clients (ESP32 / Tidbyt), animations exceeding the device limit (160 KB on Tidbyt Gen 1, 450 KB on ESP32-S3 / Wide) or 5,000 ms duration are seamlessly split into sequential chunks with exact playback durations, preventing hardware buffer exhaustion and heap allocation errors.
+   - **WebSocket (`/ws`):** Chunks stream sequentially using firmware double-buffering (chunk 0 displays while chunk 1 is pre-buffered in the hardware queue, swapping seamlessly on dwell completion) before rotating to the next app.
    - **HTTP (`/next`):** Sequential chunks are tracked per device and served with individual `Tronbyt-Dwell-Secs` headers before advancing rotation.
    - **Fault Tolerance:** If Screeny Studio is temporarily unreachable, Tronbyt Server falls back to cached chunk files to avoid interrupted playback.
 5. **Catalog Provider Filter & Live Previews:**
    - **Dynamic Provider Filter:** When multiple providers (e.g. Tronbyt and Screeny) are active, a Provider dropdown filter dynamically appears on the Add App page, allowing users to filter by provider or view all apps together. If only one provider is configured, the dropdown automatically hides.
+   - **Full-Duration Uninterrupted Previews:** Both in the web configuration UI and during device preview pushes, previews span the complete dwell time window without premature looping. The web UI renders and caches complete, unchunked WebP animations (`<appBasename>_full.webp`) matching the full dwell time, while device preview pushes stream all sequential chunks over WebSocket (or HTTP) to fill the device time window with an uninterrupted animation.
    - **Preview Generation & Crossfade Elimination:** Screeny patches generate on-demand animated WebP previews with automatic disk caching under `cache/previews/<provider>/`. Screeny Studio's built-in 2.0-second patch crossfade is automatically detected and skipped during frame capture, ensuring live catalog thumbnails and rendered device animations are 100% clean, crisp, and free from app-blending artifacts.
 
 **HTTPS (TLS):**
