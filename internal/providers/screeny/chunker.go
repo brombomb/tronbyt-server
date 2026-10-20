@@ -61,6 +61,9 @@ func SplitFramesIntoChunks(frames []*image.RGBA, fps int, maxChunkSize int, maxC
 	}
 
 	frameDurationMs := 1000 / fps
+	if frameDurationMs <= 0 {
+		frameDurationMs = 1
+	}
 	frameDuration := time.Duration(frameDurationMs) * time.Millisecond
 
 	// 1. If maxChunkSize <= 0, don't chunk: encode everything into a single chunk.
@@ -106,6 +109,20 @@ func SplitFramesIntoChunks(frames []*image.RGBA, fps int, maxChunkSize int, maxC
 		if maxFramesPerChunk > 0 && start+maxFramesPerChunk < totalFrames {
 			maxEnd = start + maxFramesPerChunk
 		}
+
+		// Fast path: test if maxEnd candidate fits under maxChunkSize in one step
+		candidateAll := frames[start:maxEnd]
+		encodedAll, err := EncodeFramesToWebP(candidateAll, frameDuration)
+		if err == nil && len(encodedAll) <= maxChunkSize {
+			chunkFrames := maxEnd - start
+			chunks = append(chunks, providers.RenderChunk{
+				WebPBytes:  encodedAll,
+				DurationMs: chunkFrames * frameDurationMs,
+			})
+			start = maxEnd
+			continue
+		}
+
 		low := start + 1
 		high := maxEnd
 		bestEnd := low
@@ -125,11 +142,14 @@ func SplitFramesIntoChunks(frames []*image.RGBA, fps int, maxChunkSize int, maxC
 		}
 
 		if bestBytes == nil {
-			// Even a single frame exceeded maxChunkSize! Emit at least 1 frame to guarantee progress.
+			// Even a single frame exceeded maxChunkSize!
 			bestEnd = start + 1
 			bestBytes, err = EncodeFramesToWebP(frames[start:bestEnd], frameDuration)
 			if err != nil {
 				return nil, fmt.Errorf("encoding single-frame fallback at frame %d: %w", start, err)
+			}
+			if len(bestBytes) > maxChunkSize {
+				return nil, fmt.Errorf("single frame %d is %d bytes, exceeding maximum chunk budget of %d bytes", start, len(bestBytes), maxChunkSize)
 			}
 		}
 

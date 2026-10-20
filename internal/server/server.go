@@ -542,6 +542,9 @@ func (s *Server) ListExternalProviders() []providers.ExternalAppProvider {
 // updateScreenyConfig updates Screeny settings in the DB and running server.
 func (s *Server) updateScreenyConfig(studioURL, scaleFilter string) error {
 	cleanURL := strings.TrimRight(strings.TrimSpace(studioURL), "/")
+	if err := validateExternalProviderURL(cleanURL); err != nil {
+		return fmt.Errorf("invalid Screeny Studio URL: %w", err)
+	}
 	s.Config.ScreenyStudioURL = cleanURL
 	if scaleFilter != "" {
 		s.Config.ScreenyScaleFilter = scaleFilter
@@ -575,6 +578,9 @@ func (s *Server) updateScreenyConfig(studioURL, scaleFilter string) error {
 // updateAwtrixConfig updates Awtrix settings in the DB and running server.
 func (s *Server) updateAwtrixConfig(awtrixURL, scaleFilter, layout string) error {
 	cleanURL := strings.TrimRight(strings.TrimSpace(awtrixURL), "/")
+	if err := validateExternalProviderURL(cleanURL); err != nil {
+		return fmt.Errorf("invalid Awtrix URL: %w", err)
+	}
 	s.Config.AwtrixURL = cleanURL
 	if scaleFilter != "" {
 		s.Config.AwtrixScaleFilter = scaleFilter

@@ -150,10 +150,25 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 		}()
 
 		now := time.Now()
-		uinterval := app.UInterval
-		if uinterval <= 0 {
-			uinterval = 10
+		dwellSecs := 15
+		if device != nil {
+			dwellSecs = device.GetEffectiveDwellTime(app)
 		}
+		if dwellSecs <= 0 {
+			dwellSecs = 15
+		}
+
+		// Refresh cadence:
+		// If user explicitly configured an update interval (UInterval > 0), respect it in minutes.
+		// Otherwise (UInterval <= 0), external procedural apps (e.g. Screeny) generate
+		// fresh continuous frames each time their dwell duration has elapsed.
+		renderExpired := false
+		if app.UInterval > 0 {
+			renderExpired = time.Since(app.LastRender) > time.Duration(app.UInterval)*time.Minute
+		} else {
+			renderExpired = time.Since(app.LastRender) >= time.Duration(dwellSecs)*time.Second
+		}
+
 		maxChunkSize := s.GetMaxChunkSizeForDevice(device)
 		needsRechunk := false
 		if maxChunkSize > 0 && device != nil {
@@ -178,7 +193,7 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 			}
 		}
 
-		if forceRender || needsRechunk || time.Since(app.LastRender) > time.Duration(uinterval)*time.Minute {
+		if forceRender || needsRechunk || renderExpired {
 			slog.Info("Rendering external app", "provider", provider.Name(), "app", appBasename)
 			startTime := time.Now()
 
@@ -191,18 +206,15 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 				}
 			}
 
-			dwellSecs := 15
-			if device != nil {
-				dwellSecs = device.GetEffectiveDwellTime(app)
-			}
 			maxChunkDurationMs := s.GetMaxChunkDurationForDevice(device)
+			renderDurationMs := min(max(dwellSecs*1000, 5000), 60000)
 
 			req := providers.RenderRequest{
 				AppID:              appID,
 				Width:              width,
 				Height:             height,
 				FPS:                s.getExternalProviderFPS(provider),
-				DurationMs:         dwellSecs * 1000,
+				DurationMs:         renderDurationMs,
 				MaxChunkSize:       maxChunkSize,
 				MaxChunkDurationMs: maxChunkDurationMs,
 				Timezone:           device.GetTimezone(),

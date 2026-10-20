@@ -150,6 +150,14 @@ func TestScreenyAdapter_Lifecycle(t *testing.T) {
 	assert.Equal(t, float32(1.0), setParamReceived["style"])
 	assert.NotContains(t, setParamReceived, "scale_filter", "scale_filter should not be sent to screeny set_param")
 	assert.True(t, len(chunks[0].WebPBytes) > 0)
+
+	// 4. Subsequent RenderAppChunks with the SAME patch must NOT call set_patch
+	// to preserve continuous procedural animation streams (Overland, Knot)
+	setPatchReceived = ""
+	chunks2, err := adapter.RenderAppChunks(ctx, req)
+	require.NoError(t, err)
+	require.NotEmpty(t, chunks2)
+	assert.Empty(t, setPatchReceived, "set_patch must not be called when patch is already active")
 }
 
 func TestScreenyAdapter_DiscardsTransitionFrames(t *testing.T) {
@@ -218,8 +226,8 @@ func TestScreenyAdapter_DiscardsTransitionFrames(t *testing.T) {
 		TransitionSkipSec: DefaultTransitionSkipSec,
 	})
 
-	// Request 5 frames (166ms at 30 fps)
-	frames, err := adapter.captureFrames(context.Background(), 30, 166, 64, 32, "none")
+	// Request 5 frames (166ms at 30 fps) with patchChanged=true
+	frames, err := adapter.captureFrames(context.Background(), 30, 166, 64, 32, "none", true)
 	require.NoError(t, err)
 	require.NotEmpty(t, frames)
 

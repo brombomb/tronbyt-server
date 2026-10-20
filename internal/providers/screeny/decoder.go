@@ -57,7 +57,17 @@ func decodeScreenyFrame(data []byte) (*image.RGBA, error) {
 		return nil, errors.New("empty packet")
 	}
 
-	// 1. Check for Screeny UDP Wire Protocol (magic 's' = 0x53)
+	// 1. Check for Studio WebSocket preview packet (52-byte header + 6144 RGB888 bytes)
+	if len(data) == PreviewPacketLen {
+		return decodeRGB888(data[PreviewHeaderLen:])
+	}
+
+	// 2. Check for raw 6144-byte RGB888 frame
+	if len(data) == NBytes {
+		return decodeRGB888(data)
+	}
+
+	// 3. Check for Screeny UDP Wire Protocol (magic 's' = 0x53)
 	if len(data) >= HeaderLen && data[0] == Magic {
 		ver := data[1] >> 4
 		ty := data[1] & 0x0F
@@ -84,16 +94,6 @@ func decodeScreenyFrame(data []byte) (*image.RGBA, error) {
 		}
 
 		return decodeCodec(codec, payload)
-	}
-
-	// 2. Check for Studio WebSocket preview packet (52-byte header + 6144 RGB888 bytes)
-	if len(data) == PreviewPacketLen {
-		return decodeRGB888(data[PreviewHeaderLen:])
-	}
-
-	// 3. Check for raw 6144-byte RGB888 frame
-	if len(data) == NBytes {
-		return decodeRGB888(data)
 	}
 
 	return nil, fmt.Errorf("unrecognized frame format (length %d)", len(data))

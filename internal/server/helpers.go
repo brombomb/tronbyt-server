@@ -982,3 +982,43 @@ var orderedAppsPreload = func(db gorm.PreloadBuilder) error {
 	db.Order(clause.OrderByColumn{Column: clause.Column{Name: "order"}, Desc: false})
 	return nil
 }
+
+var validAppIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
+
+// sanitizeAppID ensures an external app ID contains only safe alphanumeric, underscore, or hyphen characters.
+func sanitizeAppID(appID string) (string, error) {
+	if !validAppIDRegex.MatchString(appID) {
+		return "", fmt.Errorf("invalid app ID %q: must contain only alphanumeric characters, underscores, and hyphens", appID)
+	}
+	return appID, nil
+}
+
+// validateExternalProviderURL ensures provider URLs use HTTP/HTTPS and do not point to cloud metadata / link-local addresses.
+func validateExternalProviderURL(rawURL string) error {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return nil
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("URL scheme must be http or https")
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return errors.New("URL host cannot be empty")
+	}
+
+	// Block AWS / GCP / Azure link-local metadata IP 169.254.x.x and IPv6 fe80::
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return errors.New("link-local and cloud metadata IP addresses are not permitted")
+		}
+	} else if strings.EqualFold(host, "instance-data") || strings.EqualFold(host, "metadata.google.internal") {
+		return errors.New("cloud metadata endpoints are not permitted")
+	}
+
+	return nil
+}

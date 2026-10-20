@@ -173,7 +173,11 @@ func (s *Server) handleExternalProviderConfig(
 			extApps, err := provider.ListApps(ctx)
 			cancel()
 			if err != nil {
-				s.flashAndRedirect(w, r, fmt.Sprintf("Saved %s settings, but connection test failed: %v", displayName, err), "/settings/content", http.StatusSeeOther)
+			if err != nil {
+				slog.Warn("External provider connection test failed", "provider", displayName, "error", err)
+				s.flashAndRedirect(w, r, fmt.Sprintf("Saved %s settings, but connection test failed. Please verify the URL.", displayName), "/settings/content", http.StatusSeeOther)
+				return
+			}
 				return
 			}
 			s.flashAndRedirect(w, r, fmt.Sprintf("Connected to %s successfully (%d %s discovered).", displayName, len(extApps), itemNoun), "/settings/content", http.StatusSeeOther)
