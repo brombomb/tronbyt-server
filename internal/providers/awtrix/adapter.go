@@ -227,7 +227,45 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 		return nil, ctx.Err()
 	}
 
-	// 1. If custom configuration options were provided, apply them via PATCH
+	// 1. Query original settings so we can reliably restore them on exit
+	type awtrixSettingsResp struct {
+		AutoTransition       *bool `json:"autoTransition,omitempty"`
+		TransitionDurationMs *int  `json:"transitionDurationMs,omitempty"`
+	}
+	var origSettings awtrixSettingsResp
+	settingsURL := fmt.Sprintf("%s/api/v1/settings", a.baseURL)
+	if sReq, err := http.NewRequestWithContext(ctx, http.MethodGet, settingsURL, nil); err == nil {
+		if sResp, err := a.httpClient.Do(sReq); err == nil {
+			_ = json.NewDecoder(sResp.Body).Decode(&origSettings)
+			_, _ = io.Copy(io.Discard, io.LimitReader(sResp.Body, 1024))
+			_ = sResp.Body.Close()
+		}
+	}
+
+	// Ensure AWTRIX auto-transition and display settings are always restored when rendering completes or aborts
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
+		restoreMap := map[string]any{"autoTransition": true}
+		if origSettings.AutoTransition != nil {
+			restoreMap["autoTransition"] = *origSettings.AutoTransition
+		}
+		if origSettings.TransitionDurationMs != nil {
+			restoreMap["transitionDurationMs"] = *origSettings.TransitionDurationMs
+		}
+		if b, err := json.Marshal(restoreMap); err == nil {
+			if rReq, err := http.NewRequestWithContext(cleanupCtx, http.MethodPatch, settingsURL, bytes.NewReader(b)); err == nil {
+				rReq.Header.Set("Content-Type", "application/json")
+				if rResp, err := a.httpClient.Do(rReq); err == nil {
+					_, _ = io.Copy(io.Discard, io.LimitReader(rResp.Body, 1024))
+					_ = rResp.Body.Close()
+				}
+			}
+		}
+	}()
+
+	// 2. If custom configuration options were provided, apply them via PATCH
 	if len(req.Config) > 0 {
 		if cfg, isBuiltin, err := a.fetchAppConfig(ctx, req.AppID); err == nil && len(cfg.Fields) > 0 {
 			patchBody := ConvertUserConfigToAwtrix(cfg.Fields, req.Config)
@@ -242,6 +280,7 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 					if err == nil {
 						pReq.Header.Set("Content-Type", "application/json")
 						if pResp, err := a.httpClient.Do(pReq); err == nil {
+							_, _ = io.Copy(io.Discard, io.LimitReader(pResp.Body, 1024))
 							_ = pResp.Body.Close()
 						}
 					}
@@ -250,17 +289,17 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 		}
 	}
 
-	// 2. Freeze AWTRIX auto-rotation and disable transitions so only this single app renders
-	freezeURL := fmt.Sprintf("%s/api/v1/settings", a.baseURL)
+	// 3. Freeze AWTRIX auto-rotation and disable transitions so only this single app renders
 	freezeBody := []byte(`{"autoTransition":false,"transitionDurationMs":0}`)
-	if fReq, err := http.NewRequestWithContext(ctx, http.MethodPatch, freezeURL, bytes.NewReader(freezeBody)); err == nil {
+	if fReq, err := http.NewRequestWithContext(ctx, http.MethodPatch, settingsURL, bytes.NewReader(freezeBody)); err == nil {
 		fReq.Header.Set("Content-Type", "application/json")
 		if fResp, err := a.httpClient.Do(fReq); err == nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(fResp.Body, 1024))
 			_ = fResp.Body.Close()
 		}
 	}
 
-	// 3. Activate the app on the AWTRIX display
+	// 4. Activate the app on the AWTRIX display
 	activateURL := fmt.Sprintf("%s/api/v1/apps/active", a.baseURL)
 
 	// If the app is already active, Awtrix ignores PUT /apps/active and skips on_show() lifecycle hooks,
@@ -276,10 +315,12 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 				nextURL := fmt.Sprintf("%s/api/v1/apps/next", a.baseURL)
 				if nReq, err := http.NewRequestWithContext(ctx, http.MethodPost, nextURL, nil); err == nil {
 					if nResp, err := a.httpClient.Do(nReq); err == nil {
+						_, _ = io.Copy(io.Discard, io.LimitReader(nResp.Body, 1024))
 						_ = nResp.Body.Close()
 					}
 				}
 			}
+			_, _ = io.Copy(io.Discard, io.LimitReader(dResp.Body, 1024))
 			_ = dResp.Body.Close()
 		}
 	}
@@ -295,7 +336,11 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 	if err != nil {
 		return nil, fmt.Errorf("activating awtrix app: %w", err)
 	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(actResp.Body, 1024))
 	_ = actResp.Body.Close()
+	if actResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("activating awtrix app returned status %d", actResp.StatusCode)
+	}
 
 	// Wait 150ms for initial layout rendering
 	select {
@@ -343,6 +388,7 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 	ticker := time.NewTicker(frameInterval)
 	defer ticker.Stop()
 
+	consecutiveErrors := 0
 	for range targetFrames {
 		select {
 		case <-ctx.Done():
@@ -356,11 +402,27 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 		}
 		sResp, err := a.httpClient.Do(sReq)
 		if err != nil {
+			consecutiveErrors++
+			if consecutiveErrors >= 5 {
+				return nil, fmt.Errorf("reading awtrix screen frame: %w", err)
+			}
 			continue
 		}
 
+		if sResp.StatusCode != http.StatusOK {
+			_, _ = io.Copy(io.Discard, io.LimitReader(sResp.Body, 1024))
+			_ = sResp.Body.Close()
+			consecutiveErrors++
+			if consecutiveErrors >= 5 {
+				return nil, fmt.Errorf("awtrix screen frame returned status %d repeatedly", sResp.StatusCode)
+			}
+			continue
+		}
+		consecutiveErrors = 0
+
 		var sd screenData
 		decodeErr := json.NewDecoder(sResp.Body).Decode(&sd)
+		_, _ = io.Copy(io.Discard, io.LimitReader(sResp.Body, 4096))
 		_ = sResp.Body.Close()
 
 		if decodeErr != nil || sd.Width <= 0 || sd.Height <= 0 || len(sd.Pixels) != sd.Width*sd.Height {
@@ -410,6 +472,9 @@ type layoutInfo struct {
 }
 
 func detectLayoutInfo(img *image.RGBA) (layoutInfo, bool) {
+	if img == nil || img.Bounds().Dx() < 64 || img.Bounds().Dy() < 32 {
+		return layoutInfo{}, false
+	}
 	// Sample bottom-right corner pixel as candidate background
 	offBR := img.PixOffset(63, 31)
 	bgR, bgG, bgB := img.Pix[offBR], img.Pix[offBR+1], img.Pix[offBR+2]
@@ -581,8 +646,9 @@ func applyAwtrixLayout(src *image.RGBA, info layoutInfo, layout string) *image.R
 			dst.Pix[i+2] = info.bgColor[2]
 			dst.Pix[i+3] = info.bgColor[3]
 		}
+		maxX := min(src.Bounds().Dx(), 64)
 		for y := range 16 {
-			for x := range 52 {
+			for x := range maxX {
 				if x+6 >= 64 {
 					continue
 				}
@@ -620,11 +686,11 @@ func fitToTargetCanvas(img *image.RGBA, targetW, targetH int, layout string, inf
 	if img == nil {
 		return nil
 	}
-	if targetW <= 0 || targetH <= 0 {
-		return img
-	}
 	imgW := img.Bounds().Dx()
 	imgH := img.Bounds().Dy()
+	if targetW <= 0 || targetH <= 0 || imgW <= 0 || imgH <= 0 {
+		return img
+	}
 	if targetW == imgW && targetH == imgH {
 		return img
 	}

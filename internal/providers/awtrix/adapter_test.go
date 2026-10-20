@@ -403,3 +403,33 @@ func TestConvertUserConfigToAwtrix_ExcludesInternalKeys(t *testing.T) {
 	assert.Equal(t, "Berlin", body["city"])
 	assert.Nil(t, body["_layout"], "Internal keys starting with _ must not be passed to Awtrix PATCH")
 }
+
+func TestConvertUserConfigToAwtrix_DiscardsUnmappedKeys(t *testing.T) {
+	fields := []AwtrixField{
+		{Key: "city", Type: "text"},
+	}
+	userConfig := map[string]any{
+		"city":          "London",
+		"arbitrary_inj": "evil_payload",
+		"nested.key":    true,
+	}
+
+	body := ConvertUserConfigToAwtrix(fields, userConfig)
+	assert.Equal(t, "London", body["city"])
+	assert.NotContains(t, body, "arbitrary_inj", "Unmapped fields must be discarded to prevent parameter injection")
+	assert.NotContains(t, body, "nested", "Unmapped nested fields must be discarded")
+}
+
+func TestFitToTargetCanvas_ZeroDimensions(t *testing.T) {
+	emptyImg := image.NewRGBA(image.Rect(0, 0, 0, 0))
+	info := layoutInfo{mode: "32row"}
+	assert.NotPanics(t, func() {
+		res := fitToTargetCanvas(emptyImg, 64, 32, "fill", info, "bicubic")
+		assert.Equal(t, emptyImg, res)
+	})
+
+	assert.Nil(t, fitToTargetCanvas(nil, 64, 32, "fill", info, "bicubic"))
+	assert.NotPanics(t, func() {
+		detectLayoutInfo(emptyImg)
+	})
+}

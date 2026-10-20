@@ -337,48 +337,49 @@ func ConvertUserConfigToAwtrix(fields []AwtrixField, userConfig map[string]any) 
 			continue
 		}
 		f, ok := fieldMap[k]
+		if !ok {
+			continue // Whitelist only: discard unmapped keys to prevent blind parameter injection
+		}
 		path := []string{k}
-		if ok && len(f.Path) > 0 {
+		if len(f.Path) > 0 {
 			path = f.Path
 		}
 
 		// Convert value based on target field type
 		converted := v
-		if ok {
-			switch f.Type {
-			case "bool":
-				if b, ok := v.(bool); ok {
-					converted = b
-				} else if s, ok := v.(string); ok {
-					converted = strings.EqualFold(s, "true") || s == "1"
-				}
-			case "color":
-				if s, ok := v.(string); ok {
-					converted = hexToColorInt(s)
-				}
-			case "select":
-				// If options are numbers, convert string back to number
-				if len(f.Options) > 0 {
-					if _, isNum := f.Options[0].(float64); isNum {
-						if s, ok := v.(string); ok {
-							if n, err := strconv.Atoi(s); err == nil {
-								converted = n
-							}
+		switch f.Type {
+		case "bool":
+			if b, ok := v.(bool); ok {
+				converted = b
+			} else if s, ok := v.(string); ok {
+				converted = strings.EqualFold(s, "true") || s == "1"
+			}
+		case "color":
+			if s, ok := v.(string); ok {
+				converted = hexToColorInt(s)
+			}
+		case "select":
+			// If options are numbers, convert string back to number
+			if len(f.Options) > 0 {
+				if _, isNum := f.Options[0].(float64); isNum {
+					if s, ok := v.(string); ok {
+						if n, err := strconv.Atoi(s); err == nil {
+							converted = n
 						}
 					}
 				}
-			case "number", "slider":
-				if s, ok := v.(string); ok {
-					if strings.Contains(s, ".") {
-						if fl, err := strconv.ParseFloat(s, 64); err == nil {
-							converted = fl
-						}
-					} else {
-						if n, err := strconv.Atoi(s); err == nil {
-							converted = n
-						} else if fl, err := strconv.ParseFloat(s, 64); err == nil {
-							converted = fl
-						}
+			}
+		case "number", "slider":
+			if s, ok := v.(string); ok {
+				if strings.Contains(s, ".") {
+					if fl, err := strconv.ParseFloat(s, 64); err == nil {
+						converted = fl
+					}
+				} else {
+					if n, err := strconv.Atoi(s); err == nil {
+						converted = n
+					} else if fl, err := strconv.ParseFloat(s, 64); err == nil {
+						converted = fl
 					}
 				}
 			}
