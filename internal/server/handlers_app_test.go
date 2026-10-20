@@ -730,6 +730,62 @@ func TestMarkInstalledApps_AbsolutePaths(t *testing.T) {
 	assert.True(t, systemApps[0].IsInstalled, "Weather should be installed (absolute to relative conversion match)")
 }
 
+func TestMarkInstalledApps_ExternalAppIsolation(t *testing.T) {
+	s := &Server{
+		DataDir: "/app/data",
+	}
+
+	nativeWeatherPath := "system-apps/apps/weather/weather.star"
+	awtrixWeatherPath := "awtrix:Weather"
+
+	systemApps := []apps.AppMetadata{
+		{
+			ID:       "weather",
+			Name:     "Weather",
+			FileName: "weather.star",
+			Path:     "system-apps/apps/weather",
+		},
+		{
+			ID:       "Weather",
+			Name:     "Weather",
+			Provider: "awtrix",
+			Path:     "awtrix:Weather",
+		},
+	}
+
+	// Case 1: Only native Tidbyt Weather installed
+	device1 := &data.Device{
+		Apps: []*data.App{
+			{
+				Name: "Weather",
+				Path: &nativeWeatherPath,
+			},
+		},
+	}
+
+	apps1 := make([]apps.AppMetadata, len(systemApps))
+	copy(apps1, systemApps)
+	s.markInstalledApps(device1, apps1, nil)
+	assert.True(t, apps1[0].IsInstalled, "Native Weather should be installed")
+	assert.False(t, apps1[1].IsInstalled, "Awtrix Weather should NOT be installed when only native Weather is installed")
+
+	// Case 2: Only Awtrix Weather installed
+	device2 := &data.Device{
+		Apps: []*data.App{
+			{
+				Name: "Weather",
+				Path: &awtrixWeatherPath,
+			},
+		},
+	}
+
+	apps2 := make([]apps.AppMetadata, len(systemApps))
+	copy(apps2, systemApps)
+	s.markInstalledApps(device2, apps2, nil)
+	assert.False(t, apps2[0].IsInstalled, "Native Weather should NOT be installed when only Awtrix Weather is installed")
+	assert.True(t, apps2[1].IsInstalled, "Awtrix Weather should be installed")
+}
+
 // Toggling broken used to write the manifest back from a struct holding only
 // broken/brokenReason, which destroyed every other key in the file - id, name,
 // supports2x, tags, all of it. The whole point of the endpoint is a two-field
@@ -1311,7 +1367,7 @@ func TestExternalAppThumbnail_CacheInvalidationOnV7(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, freshChunk, rr.Body.Bytes())
 
-	// Verify older markers are removed and .previews_v7 exists
+	// Verify older markers are removed and .previews_v8 exists
 	_, errV3 := os.Stat(filepath.Join(cacheDir, ".unblended_v3"))
 	assert.True(t, os.IsNotExist(errV3))
 	_, errV4 := os.Stat(filepath.Join(cacheDir, ".previews_v4"))
@@ -1321,7 +1377,9 @@ func TestExternalAppThumbnail_CacheInvalidationOnV7(t *testing.T) {
 	_, errV6 := os.Stat(filepath.Join(cacheDir, ".previews_v6"))
 	assert.True(t, os.IsNotExist(errV6))
 	_, errV7 := os.Stat(filepath.Join(cacheDir, ".previews_v7"))
-	assert.NoError(t, errV7)
+	assert.True(t, os.IsNotExist(errV7))
+	_, errV8 := os.Stat(filepath.Join(cacheDir, ".previews_v8"))
+	assert.NoError(t, errV8)
 
 	// Verify app's LastRender was reset to zero time
 	var updatedApp data.App

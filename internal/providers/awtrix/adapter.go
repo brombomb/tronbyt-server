@@ -322,7 +322,19 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 	frameInterval := time.Duration(1000/fps) * time.Millisecond
 	screenURL := fmt.Sprintf("%s/api/v1/display/screen", a.baseURL)
 
-	scaleRequired := req.Width == 128 && req.Height == 64
+	layoutMode := a.layout
+	if customLayout, ok := req.Config["_layout"].(string); ok && customLayout != "" && customLayout != "default" {
+		layoutMode = customLayout
+	} else if customLayout, ok := req.Config["layout"].(string); ok && (customLayout == "center" || customLayout == "fill" || customLayout == "stretch" || customLayout == "native") {
+		layoutMode = customLayout
+	}
+	if layoutMode == "stretch" {
+		layoutMode = "fill"
+	}
+	if layoutMode != "fill" && layoutMode != "native" && layoutMode != "center" {
+		layoutMode = "center"
+	}
+
 	var frames []*image.RGBA
 	var layoutDetermined bool
 	var detectedLayout layoutInfo
@@ -368,20 +380,18 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 		}
 
 		// Determine layout mode on the first frame with visible content
-		if !layoutDetermined && a.layout != "native" && sd.Width == 64 && sd.Height == 32 {
+		if !layoutDetermined && layoutMode != "native" && sd.Width == 64 && sd.Height == 32 {
 			if info, ok := detectLayoutInfo(img); ok {
 				layoutDetermined = true
 				detectedLayout = info
 			}
 		}
 
-		if a.layout != "native" && layoutDetermined && sd.Width == 64 && sd.Height == 32 {
-			img = applyAwtrixLayout(img, detectedLayout)
+		if sd.Width == 64 && sd.Height == 32 {
+			img = applyAwtrixLayout(img, detectedLayout, layoutMode)
 		}
 
-		if scaleRequired {
-			img = screeny.ScaleFrame2x(img, a.scaleFilter)
-		}
+		img = fitToTargetCanvas(img, req.Width, req.Height, layoutMode, detectedLayout, a.scaleFilter)
 
 		frames = append(frames, img)
 	}
@@ -462,11 +472,82 @@ func detectLayoutInfo(img *image.RGBA) (layoutInfo, bool) {
 	return layoutInfo{mode: mode, bgColor: bgColor}, true
 }
 
-func applyAwtrixLayout(src *image.RGBA, info layoutInfo) *image.RGBA {
+func applyAwtrixLayout(src *image.RGBA, info layoutInfo, layout string) *image.RGBA {
+	if layout == "native" {
+		return src
+	}
+
+	if layout == "fill" {
+		switch info.mode {
+		case "8row":
+			// 8-row app (e.g. Ghost Parade: 32x8, High Speed Train: 32x8):
+			// 2x horizontal scale (32->64) and 4x vertical scale (8->32) to fill 64x32.
+			dst := image.NewRGBA(image.Rect(0, 0, 64, 32))
+			for y := range 8 {
+				for x := range 32 {
+					srcOff := src.PixOffset(x, y)
+					r, g, b, a := src.Pix[srcOff], src.Pix[srcOff+1], src.Pix[srcOff+2], src.Pix[srcOff+3]
+					for dy := range 4 {
+						for dx := range 2 {
+							dstOff := dst.PixOffset(x*2+dx, y*4+dy)
+							dst.Pix[dstOff] = r
+							dst.Pix[dstOff+1] = g
+							dst.Pix[dstOff+2] = b
+							dst.Pix[dstOff+3] = a
+						}
+					}
+				}
+			}
+			return dst
+
+		case "16row-narrow":
+			// 16-row 52-column app (e.g. Beautiful Weather: 52x16):
+			// Stretch 52 columns across 64 columns, and 2x vertical scale 16 rows to 32 rows.
+			dst := image.NewRGBA(image.Rect(0, 0, 64, 32))
+			for y := range 16 {
+				for dx := range 64 {
+					sx := (dx*51 + 31) / 63
+					srcOff := src.PixOffset(sx, y)
+					r, g, b, a := src.Pix[srcOff], src.Pix[srcOff+1], src.Pix[srcOff+2], src.Pix[srcOff+3]
+					for dy := range 2 {
+						dstOff := dst.PixOffset(dx, y*2+dy)
+						dst.Pix[dstOff] = r
+						dst.Pix[dstOff+1] = g
+						dst.Pix[dstOff+2] = b
+						dst.Pix[dstOff+3] = a
+					}
+				}
+			}
+			return dst
+
+		case "16row-full":
+			// 16-row 64-column app (e.g. Pixel Aquarium: 64x16, Weather: 64x16):
+			// 2x vertical scale 16 rows to 32 rows across all 64 columns.
+			dst := image.NewRGBA(image.Rect(0, 0, 64, 32))
+			for y := range 16 {
+				for x := range 64 {
+					srcOff := src.PixOffset(x, y)
+					r, g, b, a := src.Pix[srcOff], src.Pix[srcOff+1], src.Pix[srcOff+2], src.Pix[srcOff+3]
+					for dy := range 2 {
+						dstOff := dst.PixOffset(x, y*2+dy)
+						dst.Pix[dstOff] = r
+						dst.Pix[dstOff+1] = g
+						dst.Pix[dstOff+2] = b
+						dst.Pix[dstOff+3] = a
+					}
+				}
+			}
+			return dst
+
+		default:
+			return src
+		}
+	}
+
+	// Default: "center"
 	switch info.mode {
 	case "8row":
-		// 8-row app (e.g. Ghost Parade: 32x8, High Speed Train: 32x8):
-		// 2x integer scale to 64x16, centered vertically at Y=8..23.
+		// 8-row app: 2x integer scale to 64x16, centered vertically at Y=8..23.
 		dst := image.NewRGBA(image.Rect(0, 0, 64, 32))
 		for i := 0; i < len(dst.Pix); i += 4 {
 			dst.Pix[i] = info.bgColor[0]
@@ -474,8 +555,8 @@ func applyAwtrixLayout(src *image.RGBA, info layoutInfo) *image.RGBA {
 			dst.Pix[i+2] = info.bgColor[2]
 			dst.Pix[i+3] = info.bgColor[3]
 		}
-		for y := 0; y <= 7; y++ {
-			for x := 0; x <= 31; x++ {
+		for y := range 8 {
+			for x := range 32 {
 				srcOff := src.PixOffset(x, y)
 				r, g, b, a := src.Pix[srcOff], src.Pix[srcOff+1], src.Pix[srcOff+2], src.Pix[srcOff+3]
 				for dy := range 2 {
@@ -492,7 +573,7 @@ func applyAwtrixLayout(src *image.RGBA, info layoutInfo) *image.RGBA {
 		return dst
 
 	case "16row-narrow":
-		// 16-row 52-column app (e.g. Beautiful Weather: 52x16): center horizontally at X=6, vertically at Y=8
+		// 16-row 52-column app: center horizontally at X=6, vertically at Y=8
 		dst := image.NewRGBA(image.Rect(0, 0, 64, 32))
 		for i := 0; i < len(dst.Pix); i += 4 {
 			dst.Pix[i] = info.bgColor[0]
@@ -500,8 +581,8 @@ func applyAwtrixLayout(src *image.RGBA, info layoutInfo) *image.RGBA {
 			dst.Pix[i+2] = info.bgColor[2]
 			dst.Pix[i+3] = info.bgColor[3]
 		}
-		for y := 0; y <= 15; y++ {
-			for x := 0; x <= 51; x++ {
+		for y := range 16 {
+			for x := range 52 {
 				if x+6 >= 64 {
 					continue
 				}
@@ -513,7 +594,7 @@ func applyAwtrixLayout(src *image.RGBA, info layoutInfo) *image.RGBA {
 		return dst
 
 	case "16row-full":
-		// 16-row 64-column app (e.g. Pixel Aquarium: 64x16, Weather: 64x16): center vertically at Y=8 across full width
+		// 16-row 64-column app: center vertically at Y=8 across full width
 		dst := image.NewRGBA(image.Rect(0, 0, 64, 32))
 		for i := 0; i < len(dst.Pix); i += 4 {
 			dst.Pix[i] = info.bgColor[0]
@@ -521,8 +602,8 @@ func applyAwtrixLayout(src *image.RGBA, info layoutInfo) *image.RGBA {
 			dst.Pix[i+2] = info.bgColor[2]
 			dst.Pix[i+3] = info.bgColor[3]
 		}
-		for y := 0; y <= 15; y++ {
-			for x := 0; x <= 63; x++ {
+		for y := range 16 {
+			for x := range 64 {
 				srcOff := src.PixOffset(x, y)
 				dstOff := dst.PixOffset(x, y+8)
 				copy(dst.Pix[dstOff:dstOff+4], src.Pix[srcOff:srcOff+4])
@@ -533,4 +614,151 @@ func applyAwtrixLayout(src *image.RGBA, info layoutInfo) *image.RGBA {
 	default:
 		return src
 	}
+}
+
+func fitToTargetCanvas(img *image.RGBA, targetW, targetH int, layout string, info layoutInfo, scaleFilter string) *image.RGBA {
+	if img == nil {
+		return nil
+	}
+	if targetW <= 0 || targetH <= 0 {
+		return img
+	}
+	imgW := img.Bounds().Dx()
+	imgH := img.Bounds().Dy()
+	if targetW == imgW && targetH == imgH {
+		return img
+	}
+
+	// 128x64 (Tronberry / 2x wide displays)
+	if targetW == 128 && targetH == 64 && imgW == 64 && imgH == 32 {
+		return screeny.ScaleFrame2x(img, scaleFilter)
+	}
+
+	bg := info.bgColor
+	if bg[3] == 0 {
+		bg[3] = 0xFF
+	}
+
+	// 64x64 (Square displays)
+	if targetW == 64 && targetH == 64 && imgW == 64 && imgH == 32 {
+		dst := image.NewRGBA(image.Rect(0, 0, 64, 64))
+		if layout == "fill" {
+			for y := range 32 {
+				for x := range 64 {
+					srcOff := img.PixOffset(x, y)
+					r, g, b, a := img.Pix[srcOff], img.Pix[srcOff+1], img.Pix[srcOff+2], img.Pix[srcOff+3]
+					for dy := range 2 {
+						dstOff := dst.PixOffset(x, y*2+dy)
+						dst.Pix[dstOff] = r
+						dst.Pix[dstOff+1] = g
+						dst.Pix[dstOff+2] = b
+						dst.Pix[dstOff+3] = a
+					}
+				}
+			}
+			return dst
+		}
+
+		// Fill background
+		for i := 0; i < len(dst.Pix); i += 4 {
+			dst.Pix[i] = bg[0]
+			dst.Pix[i+1] = bg[1]
+			dst.Pix[i+2] = bg[2]
+			dst.Pix[i+3] = bg[3]
+		}
+		yOffset := 0
+		if layout != "native" {
+			yOffset = (64 - 32) / 2 // = 16
+		}
+		for y := range 32 {
+			for x := range 64 {
+				srcOff := img.PixOffset(x, y)
+				dstOff := dst.PixOffset(x, y+yOffset)
+				copy(dst.Pix[dstOff:dstOff+4], img.Pix[srcOff:srcOff+4])
+			}
+		}
+		return dst
+	}
+
+	// 128x128 (Square 2x displays)
+	if targetW == 128 && targetH == 128 && imgW == 64 && imgH == 32 {
+		img128 := screeny.ScaleFrame2x(img, scaleFilter)
+		dst := image.NewRGBA(image.Rect(0, 0, 128, 128))
+		if layout == "fill" {
+			for y := range 64 {
+				for x := range 128 {
+					srcOff := img128.PixOffset(x, y)
+					r, g, b, a := img128.Pix[srcOff], img128.Pix[srcOff+1], img128.Pix[srcOff+2], img128.Pix[srcOff+3]
+					for dy := range 2 {
+						dstOff := dst.PixOffset(x, y*2+dy)
+						dst.Pix[dstOff] = r
+						dst.Pix[dstOff+1] = g
+						dst.Pix[dstOff+2] = b
+						dst.Pix[dstOff+3] = a
+					}
+				}
+			}
+			return dst
+		}
+
+		for i := 0; i < len(dst.Pix); i += 4 {
+			dst.Pix[i] = bg[0]
+			dst.Pix[i+1] = bg[1]
+			dst.Pix[i+2] = bg[2]
+			dst.Pix[i+3] = bg[3]
+		}
+		yOffset := 0
+		if layout != "native" {
+			yOffset = (128 - 64) / 2 // = 32
+		}
+		for y := range 64 {
+			for x := range 128 {
+				srcOff := img128.PixOffset(x, y)
+				dstOff := dst.PixOffset(x, y+yOffset)
+				copy(dst.Pix[dstOff:dstOff+4], img128.Pix[srcOff:srcOff+4])
+			}
+		}
+		return dst
+	}
+
+	// General fallback for any other target dimensions
+	dst := image.NewRGBA(image.Rect(0, 0, targetW, targetH))
+	if layout == "fill" {
+		for y := range targetH {
+			sy := (y * imgH) / targetH
+			for x := range targetW {
+				sx := (x * imgW) / targetW
+				srcOff := img.PixOffset(sx, sy)
+				dstOff := dst.PixOffset(x, y)
+				copy(dst.Pix[dstOff:dstOff+4], img.Pix[srcOff:srcOff+4])
+			}
+		}
+		return dst
+	}
+
+	for i := 0; i < len(dst.Pix); i += 4 {
+		dst.Pix[i] = bg[0]
+		dst.Pix[i+1] = bg[1]
+		dst.Pix[i+2] = bg[2]
+		dst.Pix[i+3] = bg[3]
+	}
+	offsetX := max(0, (targetW-imgW)/2)
+	offsetY := 0
+	if layout != "native" {
+		offsetY = max(0, (targetH-imgH)/2)
+	}
+	for y := range imgH {
+		if y+offsetY >= targetH {
+			break
+		}
+		for x := range imgW {
+			if x+offsetX >= targetW {
+				break
+			}
+			srcOff := img.PixOffset(x, y)
+			dstOff := dst.PixOffset(x+offsetX, y+offsetY)
+			copy(dst.Pix[dstOff:dstOff+4], img.Pix[srcOff:srcOff+4])
+		}
+	}
+	return dst
 }

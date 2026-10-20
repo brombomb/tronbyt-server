@@ -613,8 +613,12 @@ func (s *Server) updateAwtrixConfig(awtrixURL, scaleFilter, layout string) error
 
 // isExternalAppPath returns true if the path refers to an external provider (e.g. "screeny:clock").
 func (s *Server) isExternalAppPath(path string) bool {
-	_, _, ok := s.parseExternalAppPath(path)
-	return ok
+	if _, _, ok := s.parseExternalAppPath(path); ok {
+		return true
+	}
+	parts := strings.SplitN(path, ":", 2)
+	return len(parts) == 2 && len(parts[0]) > 1 && parts[1] != "" &&
+		!strings.Contains(parts[0], "/") && !strings.Contains(parts[0], "\\")
 }
 
 // parseExternalAppPath splits a path like "screeny:split_flap" into (provider, "split_flap", true).

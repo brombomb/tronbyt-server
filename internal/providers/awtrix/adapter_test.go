@@ -93,7 +93,7 @@ func TestAwtrixAdapter_GetAppSchema(t *testing.T) {
 	var schema PixletSchema
 	require.NoError(t, json.Unmarshal(schemaBytes, &schema))
 	assert.Equal(t, "1", schema.Version)
-	require.Len(t, schema.Schema, 3)
+	require.Len(t, schema.Schema, 4)
 
 	assert.Equal(t, "timeMode", schema.Schema[0].ID)
 	assert.Equal(t, "Clock layout", schema.Schema[0].Name)
@@ -102,6 +102,8 @@ func TestAwtrixAdapter_GetAppSchema(t *testing.T) {
 	assert.Equal(t, "onoff", schema.Schema[1].Type)
 	assert.Equal(t, "timeColor", schema.Schema[2].ID)
 	assert.Equal(t, "color", schema.Schema[2].Type)
+	assert.Equal(t, "_layout", schema.Schema[3].ID)
+	assert.Equal(t, "dropdown", schema.Schema[3].Type)
 }
 
 func TestAwtrixAdapter_RenderAppChunks(t *testing.T) {
@@ -220,7 +222,7 @@ func TestDetectLayoutInfo_8RowWithCustomBackground(t *testing.T) {
 	assert.Equal(t, "8row", info.mode)
 	assert.Equal(t, [4]byte{5, 7, 13, 0xFF}, info.bgColor)
 
-	dst := applyAwtrixLayout(img, info)
+	dst := applyAwtrixLayout(img, info, "center")
 	require.NotNil(t, dst)
 	assert.Equal(t, 64, dst.Bounds().Dx())
 	assert.Equal(t, 32, dst.Bounds().Dy())
@@ -265,7 +267,7 @@ func TestDetectLayoutInfo_16RowNarrow(t *testing.T) {
 	assert.Equal(t, "16row-narrow", info.mode)
 	assert.Equal(t, [4]byte{0, 0, 0, 0xFF}, info.bgColor)
 
-	dst := applyAwtrixLayout(img, info)
+	dst := applyAwtrixLayout(img, info, "center")
 	// Content centered at x=6..57, y=8..23
 	contentOff := dst.PixOffset(6, 8)
 	assert.Equal(t, uint8(0xFF), dst.Pix[contentOff])
@@ -284,6 +286,120 @@ func TestDetectLayoutInfo_32RowFull(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "32row", info.mode)
 
-	dst := applyAwtrixLayout(img, info)
+	dst := applyAwtrixLayout(img, info, "center")
 	assert.Equal(t, img, dst, "32row should return src unmodified")
+}
+
+func TestApplyAwtrixLayout_Fill(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       string
+		srcW, srcH int
+		fillByte   byte
+	}{
+		{name: "8row", mode: "8row", srcW: 32, srcH: 8, fillByte: 0xAA},
+		{name: "16row-narrow", mode: "16row-narrow", srcW: 52, srcH: 16, fillByte: 0x11},
+		{name: "16row-full", mode: "16row-full", srcW: 64, srcH: 16, fillByte: 0x44},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			img := image.NewRGBA(image.Rect(0, 0, 64, 32))
+			for y := range tc.srcH {
+				for x := range tc.srcW {
+					off := img.PixOffset(x, y)
+					img.Pix[off] = tc.fillByte
+					img.Pix[off+1] = tc.fillByte
+					img.Pix[off+2] = tc.fillByte
+					img.Pix[off+3] = 0xFF
+				}
+			}
+
+			info := layoutInfo{mode: tc.mode, bgColor: [4]byte{0, 0, 0, 0xFF}}
+			dst := applyAwtrixLayout(img, info, "fill")
+			require.NotNil(t, dst)
+			assert.Equal(t, 64, dst.Bounds().Dx())
+			assert.Equal(t, 32, dst.Bounds().Dy())
+
+			// Both corners must be filled with content
+			assert.Equal(t, tc.fillByte, dst.Pix[dst.PixOffset(0, 0)])
+			assert.Equal(t, tc.fillByte, dst.Pix[dst.PixOffset(63, 31)])
+		})
+	}
+}
+
+func TestFitToTargetCanvas_Tronberry128x64(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 64, 32))
+	img.Pix[0] = 0x99
+
+	info := layoutInfo{mode: "32row", bgColor: [4]byte{0, 0, 0, 0xFF}}
+	dst := fitToTargetCanvas(img, 128, 64, "fill", info, "nearest")
+	require.NotNil(t, dst)
+	assert.Equal(t, 128, dst.Bounds().Dx())
+	assert.Equal(t, 64, dst.Bounds().Dy())
+}
+
+func TestFitToTargetCanvas_Square64x64_Center(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 64, 32))
+	for i := 0; i < len(img.Pix); i += 4 {
+		img.Pix[i] = 0xAA
+		img.Pix[i+1] = 0xBB
+		img.Pix[i+2] = 0xCC
+		img.Pix[i+3] = 0xFF
+	}
+
+	info := layoutInfo{mode: "32row", bgColor: [4]byte{1, 2, 3, 0xFF}}
+	dst := fitToTargetCanvas(img, 64, 64, "center", info, "nearest")
+	require.NotNil(t, dst)
+	assert.Equal(t, 64, dst.Bounds().Dx())
+	assert.Equal(t, 64, dst.Bounds().Dy())
+
+	// Top rows (y=0..15) must be background color
+	topOff := dst.PixOffset(10, 5)
+	assert.Equal(t, uint8(1), dst.Pix[topOff])
+	assert.Equal(t, uint8(2), dst.Pix[topOff+1])
+
+	// Centered content (y=16..47)
+	midOff := dst.PixOffset(10, 20)
+	assert.Equal(t, uint8(0xAA), dst.Pix[midOff])
+
+	// Bottom rows (y=48..63) must be background color
+	botOff := dst.PixOffset(10, 55)
+	assert.Equal(t, uint8(1), dst.Pix[botOff])
+}
+
+func TestFitToTargetCanvas_Square64x64_Fill(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 64, 32))
+	for i := 0; i < len(img.Pix); i += 4 {
+		img.Pix[i] = 0xAA
+		img.Pix[i+1] = 0xBB
+		img.Pix[i+2] = 0xCC
+		img.Pix[i+3] = 0xFF
+	}
+
+	info := layoutInfo{mode: "32row", bgColor: [4]byte{0, 0, 0, 0xFF}}
+	dst := fitToTargetCanvas(img, 64, 64, "fill", info, "nearest")
+	require.NotNil(t, dst)
+	assert.Equal(t, 64, dst.Bounds().Dx())
+	assert.Equal(t, 64, dst.Bounds().Dy())
+
+	// Entire canvas should be filled with content
+	topOff := dst.PixOffset(0, 0)
+	assert.Equal(t, uint8(0xAA), dst.Pix[topOff])
+	botOff := dst.PixOffset(63, 63)
+	assert.Equal(t, uint8(0xAA), dst.Pix[botOff])
+}
+
+func TestConvertUserConfigToAwtrix_ExcludesInternalKeys(t *testing.T) {
+	fields := []AwtrixField{
+		{Key: "city", Type: "text"},
+	}
+	userConfig := map[string]any{
+		"city":    "Berlin",
+		"_layout": "fill",
+	}
+
+	body := ConvertUserConfigToAwtrix(fields, userConfig)
+	assert.Equal(t, "Berlin", body["city"])
+	assert.Nil(t, body["_layout"], "Internal keys starting with _ must not be passed to Awtrix PATCH")
 }

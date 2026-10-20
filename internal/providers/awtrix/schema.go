@@ -296,6 +296,21 @@ func TranslateAwtrixSchema(resp AwtrixConfigResponse, isBuiltin bool) ([]byte, e
 		schemaFields = append(schemaFields, field)
 	}
 
+	// Add per-app display layout option
+	schemaFields = append(schemaFields, PixletSchemaField{
+		ID:          "_layout",
+		Name:        "Display Layout",
+		Description: "Positioning & scaling mode (default uses server setting)",
+		Type:        "dropdown",
+		Default:     "default",
+		Options: []PixletOption{
+			{Display: "Server Default", Value: "default"},
+			{Display: "Auto-Center & Pad", Value: "center"},
+			{Display: "Stretch & Fill", Value: "fill"},
+			{Display: "Native Top-Left", Value: "native"},
+		},
+	})
+
 	pixSchema := PixletSchema{
 		Version: "1",
 		Schema:  schemaFields,
@@ -318,6 +333,9 @@ func ConvertUserConfigToAwtrix(fields []AwtrixField, userConfig map[string]any) 
 	}
 
 	for k, v := range userConfig {
+		if strings.HasPrefix(k, "_") {
+			continue
+		}
 		f, ok := fieldMap[k]
 		path := []string{k}
 		if ok && len(f.Path) > 0 {

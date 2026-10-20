@@ -151,7 +151,10 @@ func (s *Server) markInstalledApps(device *data.Device, systemApps []apps.AppMet
 	installedNames := make(map[string]bool)
 	installedPaths := make(map[string]bool)
 	for _, da := range device.Apps {
-		installedNames[da.Name] = true
+		isExt := da.Path != nil && s.isExternalAppPath(*da.Path)
+		if !isExt {
+			installedNames[da.Name] = true
+		}
 		if da.Path != nil && *da.Path != "" {
 			p := *da.Path
 			installedPaths[p] = true
@@ -167,6 +170,13 @@ func (s *Server) markInstalledApps(device *data.Device, systemApps []apps.AppMet
 	}
 
 	for i := range systemApps {
+		isExt := systemApps[i].Provider != "" || s.isExternalAppPath(systemApps[i].Path)
+		if isExt {
+			if installedPaths[systemApps[i].Path] {
+				systemApps[i].IsInstalled = true
+			}
+			continue
+		}
 		fullPath := filepath.Join(systemApps[i].Path, systemApps[i].FileName)
 		if installedNames[systemApps[i].ID] || installedNames[systemApps[i].Name] ||
 			installedPaths[systemApps[i].Path] || installedPaths[fullPath] {
@@ -174,6 +184,13 @@ func (s *Server) markInstalledApps(device *data.Device, systemApps []apps.AppMet
 		}
 	}
 	for i := range customApps {
+		isExt := customApps[i].Provider != "" || s.isExternalAppPath(customApps[i].Path)
+		if isExt {
+			if installedPaths[customApps[i].Path] {
+				customApps[i].IsInstalled = true
+			}
+			continue
+		}
 		if installedNames[customApps[i].ID] || installedNames[customApps[i].Name] ||
 			installedPaths[customApps[i].Path] || installedPaths[filepath.ToSlash(filepath.Dir(customApps[i].Path))] {
 			customApps[i].IsInstalled = true
@@ -426,11 +443,11 @@ const externalAppThumbnailDurationMs = 3000
 
 func (s *Server) ensureCleanPreviewCache(providerName string) string {
 	cacheDir := filepath.Join(s.DataDir, "cache", "previews", providerName)
-	markerFile := filepath.Join(cacheDir, ".previews_v7")
+	markerFile := filepath.Join(cacheDir, ".previews_v8")
 	if _, err := os.Stat(markerFile); os.IsNotExist(err) {
 		_ = os.RemoveAll(cacheDir)
 		_ = os.MkdirAll(cacheDir, 0755)
-		_ = os.WriteFile(markerFile, []byte("v7"), 0644)
+		_ = os.WriteFile(markerFile, []byte("v8"), 0644)
 
 		s.appChunksMu.Lock()
 		s.appChunksCache = make(map[string][]providers.RenderChunk)
