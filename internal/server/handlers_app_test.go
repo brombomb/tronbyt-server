@@ -1268,7 +1268,7 @@ func TestHandleCurrentApp_ETagAnd304(t *testing.T) {
 	assert.Empty(t, rr2.Body.Bytes())
 }
 
-func TestExternalAppThumbnail_CacheInvalidationOnV5(t *testing.T) {
+func TestExternalAppThumbnail_CacheInvalidationOnV6(t *testing.T) {
 	s := newTestServer(t)
 
 	// Pre-create cache dir with older .unblended_v3 marker and stale thumbnail
@@ -1276,6 +1276,7 @@ func TestExternalAppThumbnail_CacheInvalidationOnV5(t *testing.T) {
 	require.NoError(t, os.MkdirAll(cacheDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ".unblended_v3"), []byte("v3"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ".previews_v4"), []byte("v4"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ".previews_v5"), []byte("v5"), 0644))
 	staleThumbnail := []byte("stale-corrupted-thumbnail")
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "ghosts.webp"), staleThumbnail, 0644))
 
@@ -1309,13 +1310,15 @@ func TestExternalAppThumbnail_CacheInvalidationOnV5(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, freshChunk, rr.Body.Bytes())
 
-	// Verify .unblended_v3 and .previews_v4 are removed and .previews_v5 exists
+	// Verify .unblended_v3, .previews_v4, and .previews_v5 are removed and .previews_v6 exists
 	_, errV3 := os.Stat(filepath.Join(cacheDir, ".unblended_v3"))
 	assert.True(t, os.IsNotExist(errV3))
 	_, errV4 := os.Stat(filepath.Join(cacheDir, ".previews_v4"))
 	assert.True(t, os.IsNotExist(errV4))
 	_, errV5 := os.Stat(filepath.Join(cacheDir, ".previews_v5"))
-	assert.NoError(t, errV5)
+	assert.True(t, os.IsNotExist(errV5))
+	_, errV6 := os.Stat(filepath.Join(cacheDir, ".previews_v6"))
+	assert.NoError(t, errV6)
 
 	// Verify app's LastRender was reset to zero time
 	var updatedApp data.App

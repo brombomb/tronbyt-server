@@ -262,6 +262,32 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 
 	// 3. Activate the app on the AWTRIX display
 	activateURL := fmt.Sprintf("%s/api/v1/apps/active", a.baseURL)
+
+	// If the app is already active, Awtrix ignores PUT /apps/active and skips on_show() lifecycle hooks,
+	// leaving animation timers running at the tail end. Briefly switch away to force a clean lifecycle restart.
+	deviceURL := fmt.Sprintf("%s/api/v1/device", a.baseURL)
+	if dReq, err := http.NewRequestWithContext(ctx, http.MethodGet, deviceURL, nil); err == nil {
+		if dResp, err := a.httpClient.Do(dReq); err == nil {
+			var devInfo struct {
+				CurrentApp string `json:"currentApp"`
+			}
+			if json.NewDecoder(dResp.Body).Decode(&devInfo) == nil && devInfo.CurrentApp == req.AppID {
+				resetApp := "Time"
+				if req.AppID == "Time" {
+					resetApp = "Date"
+				}
+				resetBody, _ := json.Marshal(map[string]string{"name": resetApp})
+				if rReq, err := http.NewRequestWithContext(ctx, http.MethodPut, activateURL, bytes.NewReader(resetBody)); err == nil {
+					rReq.Header.Set("Content-Type", "application/json")
+					if rResp, err := a.httpClient.Do(rReq); err == nil {
+						_ = rResp.Body.Close()
+					}
+				}
+			}
+			_ = dResp.Body.Close()
+		}
+	}
+
 	activateBody, _ := json.Marshal(map[string]string{"name": req.AppID})
 	actReq, err := http.NewRequestWithContext(ctx, http.MethodPut, activateURL, bytes.NewReader(activateBody))
 	if err != nil {
