@@ -201,7 +201,7 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 				AppID:              appID,
 				Width:              width,
 				Height:             height,
-				FPS:                s.Config.ScreenyFPS,
+				FPS:                s.getExternalProviderFPS(provider),
 				DurationMs:         dwellSecs * 1000,
 				MaxChunkSize:       maxChunkSize,
 				MaxChunkDurationMs: maxChunkDurationMs,

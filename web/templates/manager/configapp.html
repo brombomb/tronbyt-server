@@ -2203,6 +2203,9 @@ function createImageUploadField(field, config) {
         previewImage.addEventListener('load', () => {
             previewImage.classList.add('loaded');
         });
+        previewImage.addEventListener('error', () => {
+            previewImage.classList.add('loaded');
+        });
         // Handle cached images
         if (previewImage.complete) {
             previewImage.classList.add('loaded');

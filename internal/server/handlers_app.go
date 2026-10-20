@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -322,6 +323,17 @@ func (s *Server) handleAddAppPost(w http.ResponseWriter, r *http.Request) {
 	// Trigger initial render
 	if !s.isExternalAppPath(appPath) {
 		s.possiblyRender(r.Context(), &newApp, device, user)
+	} else if provider, extAppID, ok := s.parseExternalAppPath(appPath); ok {
+		// Initialize the new external app installation with the preheated preview thumbnail so the config page loads instantly
+		cacheDir := s.ensureCleanPreviewCache(provider.Name())
+		thumbFile := filepath.Join(cacheDir, extAppID+".webp")
+		if thumbBytes, err := os.ReadFile(thumbFile); err == nil && len(thumbBytes) > 0 {
+			if deviceWebpDir, err := s.ensureDeviceImageDir(device.ID); err == nil {
+				baseName := fmt.Sprintf("%s-%s", newApp.Name, newApp.Iname)
+				_ = os.WriteFile(filepath.Join(deviceWebpDir, baseName+".webp"), thumbBytes, 0644)
+				_ = os.WriteFile(filepath.Join(deviceWebpDir, baseName+"_full.webp"), thumbBytes, 0644)
+			}
+		}
 	}
 
 	// Notify Dashboard & Device
@@ -971,15 +983,34 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 		}
 
 		if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
+			// If configData is empty or matches the already-saved config, serve existing preview or preheated thumbnail immediately
+			if len(configData) == 0 || reflect.DeepEqual(configData, app.Config) {
+				deviceWebpDir, err := s.ensureDeviceImageDir(device.ID)
+				if err == nil {
+					fullPath := filepath.Join(deviceWebpDir, fmt.Sprintf("%s-%s_full.webp", app.Name, app.Iname))
+					if b, err := os.ReadFile(fullPath); err == nil && len(b) > 0 {
+						w.Header().Set("Content-Type", "image/webp")
+						w.Header().Set("Cache-Control", "no-cache")
+						_, _ = w.Write(b)
+						return
+					}
+				}
+				cacheDir := s.ensureCleanPreviewCache(provider.Name())
+				cacheFile := filepath.Join(cacheDir, appID+".webp")
+				if b, err := os.ReadFile(cacheFile); err == nil && len(b) > 0 {
+					w.Header().Set("Content-Type", "image/webp")
+					w.Header().Set("Cache-Control", "no-cache")
+					_, _ = w.Write(b)
+					return
+				}
+			}
+
 			width, height := device.Type.CanvasSize()
 			if device.Type.Supports2x() {
 				width *= 2
 				height *= 2
 			}
-			fps := s.Config.ScreenyFPS
-			if fps <= 0 {
-				fps = 30
-			}
+			fps := s.getExternalProviderFPS(provider)
 			dwellSecs := 10
 			if device != nil {
 				dwellSecs = device.GetEffectiveDwellTime(app)
@@ -1061,16 +1092,26 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 				return
 			}
 
+			// If config has not been customized, serve the preheated thumbnail immediately
+			if len(app.Config) == 0 {
+				cacheDir := s.ensureCleanPreviewCache(provider.Name())
+				cacheFile := filepath.Join(cacheDir, appID+".webp")
+				if b, err := os.ReadFile(cacheFile); err == nil && len(b) > 0 {
+					if fullPath != "" {
+						_ = os.WriteFile(fullPath, b, 0644)
+					}
+					s.serveThumbnailBytes(w, r, b)
+					return
+				}
+			}
+
 			// Render on-demand with saved app.Config for the full dwell time window
 			width, height := device.Type.CanvasSize()
 			if device.Type.Supports2x() {
 				width *= 2
 				height *= 2
 			}
-			fps := s.Config.ScreenyFPS
-			if fps <= 0 {
-				fps = 30
-			}
+			fps := s.getExternalProviderFPS(provider)
 			dwellSecs := 10
 			if device != nil {
 				dwellSecs = device.GetEffectiveDwellTime(app)
@@ -1196,10 +1237,7 @@ func (s *Server) handlePushPreview(w http.ResponseWriter, r *http.Request) {
 
 	if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
 		width, height := device.Type.CanvasSize()
-		fps := s.Config.ScreenyFPS
-		if fps <= 0 {
-			fps = 30
-		}
+		fps := s.getExternalProviderFPS(provider)
 		maxChunkSize := s.GetMaxChunkSizeForDevice(device)
 		previewConfig := app.Config
 		if configBody != nil {

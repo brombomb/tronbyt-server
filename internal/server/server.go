@@ -618,6 +618,20 @@ func (s *Server) parseExternalAppPath(path string) (providers.ExternalAppProvide
 	return provider, parts[1], true
 }
 
+// getExternalProviderFPS returns the configured frame rate for a provider.
+func (s *Server) getExternalProviderFPS(provider providers.ExternalAppProvider) int {
+	if provider != nil && provider.Name() == "awtrix" {
+		if s.Config.AwtrixFPS > 0 {
+			return s.Config.AwtrixFPS
+		}
+		return 15
+	}
+	if s.Config.ScreenyFPS > 0 {
+		return s.Config.ScreenyFPS
+	}
+	return 30
+}
+
 // GetMaxChunkSizeForDevice returns the chunk size budget based on device type.
 func (s *Server) GetMaxChunkSizeForDevice(device *data.Device) int {
 	if device == nil {
