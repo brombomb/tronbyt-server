@@ -622,10 +622,7 @@ func (s *Server) handleConfigAppGet(w http.ResponseWriter, r *http.Request) {
 	var externalProviderName string
 	if app.Path != nil && s.isExternalAppPath(*app.Path) {
 		if provider, _, ok := s.parseExternalAppPath(*app.Path); ok {
-			if provider.Name() == "awtrix" && s.Config.AwtrixURL != "" {
-				externalAppURL = s.Config.AwtrixURL + "/#/apps"
-				externalProviderName = "AWTRIX NG"
-			} else if provider.Name() == "screeny" && s.Config.ScreenyStudioURL != "" {
+			if provider.Name() == "screeny" && s.Config.ScreenyStudioURL != "" {
 				externalAppURL = s.Config.ScreenyStudioURL
 				externalProviderName = "Screeny"
 			}

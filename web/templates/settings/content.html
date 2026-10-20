@@ -347,13 +347,6 @@
                 <h3 style="margin: 0;">AWTRIX NG</h3>
                 <div style="display: flex; align-items: center; gap: 8px;">
                     {{ if .AwtrixConnected }}
-                    <a href="{{ .AwtrixURL }}/#/apps"
-                       target="_blank"
-                       rel="noopener noreferrer"
-                       class="w3-button w3-round w3-small w3-light-gray"
-                       title="Open AWTRIX Web Dashboard">
-                        <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i> Open Hub
-                    </a>
                     <span class="w3-tag w3-green w3-round" style="font-size: 0.85rem; padding: 4px 10px;">
                         <i class="fa-solid fa-circle-check" aria-hidden="true"></i> {{ .AwtrixStatus }}
                     </span>
