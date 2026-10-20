@@ -264,7 +264,8 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 	activateURL := fmt.Sprintf("%s/api/v1/apps/active", a.baseURL)
 
 	// If the app is already active, Awtrix ignores PUT /apps/active and skips on_show() lifecycle hooks,
-	// leaving animation timers running at the tail end. Briefly switch away to force a clean lifecycle restart.
+	// leaving animation timers running at the tail end. Briefly switch away using POST /apps/next to force
+	// a clean lifecycle restart.
 	deviceURL := fmt.Sprintf("%s/api/v1/device", a.baseURL)
 	if dReq, err := http.NewRequestWithContext(ctx, http.MethodGet, deviceURL, nil); err == nil {
 		if dResp, err := a.httpClient.Do(dReq); err == nil {
@@ -272,15 +273,10 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 				CurrentApp string `json:"currentApp"`
 			}
 			if json.NewDecoder(dResp.Body).Decode(&devInfo) == nil && devInfo.CurrentApp == req.AppID {
-				resetApp := "Time"
-				if req.AppID == "Time" {
-					resetApp = "Date"
-				}
-				resetBody, _ := json.Marshal(map[string]string{"name": resetApp})
-				if rReq, err := http.NewRequestWithContext(ctx, http.MethodPut, activateURL, bytes.NewReader(resetBody)); err == nil {
-					rReq.Header.Set("Content-Type", "application/json")
-					if rResp, err := a.httpClient.Do(rReq); err == nil {
-						_ = rResp.Body.Close()
+				nextURL := fmt.Sprintf("%s/api/v1/apps/next", a.baseURL)
+				if nReq, err := http.NewRequestWithContext(ctx, http.MethodPost, nextURL, nil); err == nil {
+					if nResp, err := a.httpClient.Do(nReq); err == nil {
+						_ = nResp.Body.Close()
 					}
 				}
 			}
@@ -329,7 +325,7 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 	scaleRequired := req.Width == 128 && req.Height == 64
 	var frames []*image.RGBA
 	var layoutDetermined bool
-	var layoutMode string
+	var detectedLayout layoutInfo
 
 	// 5. Capture frames
 	ticker := time.NewTicker(frameInterval)
@@ -371,43 +367,16 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 			img.Pix[offset+3] = 0xFF
 		}
 
-		// Determine layout mode on the first frame with visible pixels
+		// Determine layout mode on the first frame with visible content
 		if !layoutDetermined && a.layout != "native" && sd.Width == 64 && sd.Height == 32 {
-			maxY := 0
-			maxX := 0
-			hasPixels := false
-			for y := range 32 {
-				for x := range 64 {
-					off := img.PixOffset(x, y)
-					if img.Pix[off] != 0 || img.Pix[off+1] != 0 || img.Pix[off+2] != 0 {
-						hasPixels = true
-						if y > maxY {
-							maxY = y
-						}
-						if x > maxX {
-							maxX = x
-						}
-					}
-				}
-			}
-			if hasPixels {
+			if info, ok := detectLayoutInfo(img); ok {
 				layoutDetermined = true
-				if maxY <= 7 {
-					layoutMode = "8row"
-				} else if maxY <= 15 {
-					if maxX <= 52 {
-						layoutMode = "16row-narrow"
-					} else {
-						layoutMode = "16row-full"
-					}
-				} else {
-					layoutMode = "32row"
-				}
+				detectedLayout = info
 			}
 		}
 
 		if a.layout != "native" && layoutDetermined && sd.Width == 64 && sd.Height == 32 {
-			img = applyAwtrixLayout(img, layoutMode)
+			img = applyAwtrixLayout(img, detectedLayout)
 		}
 
 		if scaleRequired {
@@ -425,11 +394,86 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 	return screeny.SplitFramesIntoChunks(frames, fps, req.MaxChunkSize, req.MaxChunkDurationMs)
 }
 
-func applyAwtrixLayout(src *image.RGBA, mode string) *image.RGBA {
-	switch mode {
+type layoutInfo struct {
+	mode    string  // "8row", "16row-narrow", "16row-full", "32row"
+	bgColor [4]byte // R, G, B, A
+}
+
+func detectLayoutInfo(img *image.RGBA) (layoutInfo, bool) {
+	// Sample bottom-right corner pixel as candidate background
+	offBR := img.PixOffset(63, 31)
+	bgR, bgG, bgB := img.Pix[offBR], img.Pix[offBR+1], img.Pix[offBR+2]
+
+	// Check if the bottom row (y=31) is uniform
+	isUniformRow31 := true
+	for x := range 64 {
+		off := img.PixOffset(x, 31)
+		if img.Pix[off] != bgR || img.Pix[off+1] != bgG || img.Pix[off+2] != bgB {
+			isUniformRow31 = false
+			break
+		}
+	}
+
+	// If bottom row is not uniform, the app renders active content across all 32 rows
+	if !isUniformRow31 {
+		return layoutInfo{mode: "32row", bgColor: [4]byte{0, 0, 0, 0xFF}}, true
+	}
+
+	bgColor := [4]byte{bgR, bgG, bgB, 0xFF}
+
+	// Find the bounding box of pixels differing from bgColor in rows 0..30
+	maxY := -1
+	maxX := -1
+	hasContent := false
+
+	for y := range 31 {
+		for x := range 64 {
+			off := img.PixOffset(x, y)
+			if img.Pix[off] != bgR || img.Pix[off+1] != bgG || img.Pix[off+2] != bgB {
+				hasContent = true
+				if y > maxY {
+					maxY = y
+				}
+				if x > maxX {
+					maxX = x
+				}
+			}
+		}
+	}
+
+	// If no content differing from bg is found yet (e.g. frame is pure black or pure clear before draw), wait for next frame
+	if !hasContent {
+		return layoutInfo{}, false
+	}
+
+	var mode string
+	if maxY <= 7 {
+		mode = "8row"
+	} else if maxY <= 15 {
+		if maxX <= 52 {
+			mode = "16row-narrow"
+		} else {
+			mode = "16row-full"
+		}
+	} else {
+		mode = "32row"
+	}
+
+	return layoutInfo{mode: mode, bgColor: bgColor}, true
+}
+
+func applyAwtrixLayout(src *image.RGBA, info layoutInfo) *image.RGBA {
+	switch info.mode {
 	case "8row":
-		// 8-row app (e.g. Ghost Parade: 32x8): 2x integer scale to 64x16, centered vertically at Y=8..23
+		// 8-row app (e.g. Ghost Parade: 32x8, High Speed Train: 32x8):
+		// 2x integer scale to 64x16, centered vertically at Y=8..23.
 		dst := image.NewRGBA(image.Rect(0, 0, 64, 32))
+		for i := 0; i < len(dst.Pix); i += 4 {
+			dst.Pix[i] = info.bgColor[0]
+			dst.Pix[i+1] = info.bgColor[1]
+			dst.Pix[i+2] = info.bgColor[2]
+			dst.Pix[i+3] = info.bgColor[3]
+		}
 		for y := 0; y <= 7; y++ {
 			for x := 0; x <= 31; x++ {
 				srcOff := src.PixOffset(x, y)
@@ -450,6 +494,12 @@ func applyAwtrixLayout(src *image.RGBA, mode string) *image.RGBA {
 	case "16row-narrow":
 		// 16-row 52-column app (e.g. Beautiful Weather: 52x16): center horizontally at X=6, vertically at Y=8
 		dst := image.NewRGBA(image.Rect(0, 0, 64, 32))
+		for i := 0; i < len(dst.Pix); i += 4 {
+			dst.Pix[i] = info.bgColor[0]
+			dst.Pix[i+1] = info.bgColor[1]
+			dst.Pix[i+2] = info.bgColor[2]
+			dst.Pix[i+3] = info.bgColor[3]
+		}
 		for y := 0; y <= 15; y++ {
 			for x := 0; x <= 51; x++ {
 				if x+6 >= 64 {
@@ -463,8 +513,14 @@ func applyAwtrixLayout(src *image.RGBA, mode string) *image.RGBA {
 		return dst
 
 	case "16row-full":
-		// 16-row 64-column app (e.g. Pixel Aquarium: 64x16): center vertically at Y=8 across full width
+		// 16-row 64-column app (e.g. Pixel Aquarium: 64x16, Weather: 64x16): center vertically at Y=8 across full width
 		dst := image.NewRGBA(image.Rect(0, 0, 64, 32))
+		for i := 0; i < len(dst.Pix); i += 4 {
+			dst.Pix[i] = info.bgColor[0]
+			dst.Pix[i+1] = info.bgColor[1]
+			dst.Pix[i+2] = info.bgColor[2]
+			dst.Pix[i+3] = info.bgColor[3]
+		}
 		for y := 0; y <= 15; y++ {
 			for x := 0; x <= 63; x++ {
 				srcOff := src.PixOffset(x, y)

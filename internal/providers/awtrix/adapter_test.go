@@ -3,6 +3,7 @@ package awtrix
 import (
 	"context"
 	"encoding/json"
+	"image"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -190,4 +191,99 @@ func TestConvertUserConfigToAwtrix(t *testing.T) {
 	wb, ok := converted["weekdayBar"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, true, wb["show"])
+}
+
+func TestDetectLayoutInfo_8RowWithCustomBackground(t *testing.T) {
+	// Create 64x32 image with High Speed Train's background color 0x05070D
+	img := image.NewRGBA(image.Rect(0, 0, 64, 32))
+	for i := 0; i < len(img.Pix); i += 4 {
+		img.Pix[i] = 5
+		img.Pix[i+1] = 7
+		img.Pix[i+2] = 13
+		img.Pix[i+3] = 0xFF
+	}
+	// Draw track on y=6, 7 across x=0..31
+	for x := range 32 {
+		off6 := img.PixOffset(x, 6)
+		img.Pix[off6] = 0x47
+		img.Pix[off6+1] = 0x4E
+		img.Pix[off6+2] = 0x5C
+
+		off7 := img.PixOffset(x, 7)
+		img.Pix[off7] = 0x26
+		img.Pix[off7+1] = 0x19
+		img.Pix[off7+2] = 0x10
+	}
+
+	info, ok := detectLayoutInfo(img)
+	require.True(t, ok)
+	assert.Equal(t, "8row", info.mode)
+	assert.Equal(t, [4]byte{5, 7, 13, 0xFF}, info.bgColor)
+
+	dst := applyAwtrixLayout(img, info)
+	require.NotNil(t, dst)
+	assert.Equal(t, 64, dst.Bounds().Dx())
+	assert.Equal(t, 32, dst.Bounds().Dy())
+
+	// Top rows (y=0..7) and bottom rows (y=24..31) must be background color
+	topOff := dst.PixOffset(10, 2)
+	assert.Equal(t, uint8(5), dst.Pix[topOff])
+	assert.Equal(t, uint8(7), dst.Pix[topOff+1])
+	assert.Equal(t, uint8(13), dst.Pix[topOff+2])
+
+	botOff := dst.PixOffset(10, 28)
+	assert.Equal(t, uint8(5), dst.Pix[botOff])
+	assert.Equal(t, uint8(7), dst.Pix[botOff+1])
+	assert.Equal(t, uint8(13), dst.Pix[botOff+2])
+
+	// Track scaled 2x centered at y=8 + 6*2 = 20
+	trackOff := dst.PixOffset(0, 20)
+	assert.Equal(t, uint8(0x47), dst.Pix[trackOff])
+	assert.Equal(t, uint8(0x4E), dst.Pix[trackOff+1])
+	assert.Equal(t, uint8(0x5C), dst.Pix[trackOff+2])
+
+	// Right edge of track at x=63 (31*2 + 1)
+	trackRightOff := dst.PixOffset(63, 20)
+	assert.Equal(t, uint8(0x47), dst.Pix[trackRightOff])
+}
+
+func TestDetectLayoutInfo_16RowNarrow(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 64, 32))
+	// Draw content in 52x16 area
+	for y := range 16 {
+		for x := range 52 {
+			off := img.PixOffset(x, y)
+			img.Pix[off] = 0xFF
+			img.Pix[off+1] = 0xAA
+			img.Pix[off+2] = 0x55
+			img.Pix[off+3] = 0xFF
+		}
+	}
+
+	info, ok := detectLayoutInfo(img)
+	require.True(t, ok)
+	assert.Equal(t, "16row-narrow", info.mode)
+	assert.Equal(t, [4]byte{0, 0, 0, 0xFF}, info.bgColor)
+
+	dst := applyAwtrixLayout(img, info)
+	// Content centered at x=6..57, y=8..23
+	contentOff := dst.PixOffset(6, 8)
+	assert.Equal(t, uint8(0xFF), dst.Pix[contentOff])
+
+	borderOff := dst.PixOffset(2, 4)
+	assert.Equal(t, uint8(0), dst.Pix[borderOff])
+}
+
+func TestDetectLayoutInfo_32RowFull(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 64, 32))
+	// Draw content that reaches row 31
+	off := img.PixOffset(10, 31)
+	img.Pix[off] = 0xFF
+
+	info, ok := detectLayoutInfo(img)
+	require.True(t, ok)
+	assert.Equal(t, "32row", info.mode)
+
+	dst := applyAwtrixLayout(img, info)
+	assert.Equal(t, img, dst, "32row should return src unmodified")
 }
