@@ -159,14 +159,16 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 		}
 
 		// Refresh cadence:
-		// If user explicitly configured an update interval (UInterval > 0), respect it in minutes.
-		// Otherwise (UInterval <= 0), external procedural apps (e.g. Screeny) generate
-		// fresh continuous frames each time their dwell duration has elapsed.
+		// Screeny procedural simulations (e.g. Flock, Overland, Knot) generate continuous frames
+		// on each rotation cycle based on dwell time, regardless of database UInterval (which defaults to 10m).
+		// Other external providers respect UInterval if positive, otherwise falling back to dwell duration.
 		renderExpired := false
-		if app.UInterval > 0 {
+		if provider.Name() == "screeny" {
+			renderExpired = time.Since(app.LastRender) >= time.Duration(max(1, dwellSecs-1))*time.Second
+		} else if app.UInterval > 0 {
 			renderExpired = time.Since(app.LastRender) > time.Duration(app.UInterval)*time.Minute
 		} else {
-			renderExpired = time.Since(app.LastRender) >= time.Duration(dwellSecs)*time.Second
+			renderExpired = time.Since(app.LastRender) >= time.Duration(max(1, dwellSecs-1))*time.Second
 		}
 
 		maxChunkSize := s.GetMaxChunkSizeForDevice(device)

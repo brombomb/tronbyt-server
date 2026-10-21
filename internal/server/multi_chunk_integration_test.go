@@ -40,9 +40,10 @@ var dummyChunkWebP3 = []byte{
 }
 
 type mockExternalProvider struct {
-	name   string
-	apps   []providers.ExternalAppMeta
-	chunks []providers.RenderChunk
+	name       string
+	apps       []providers.ExternalAppMeta
+	chunks     []providers.RenderChunk
+	renderFunc func(ctx context.Context, req providers.RenderRequest) ([]providers.RenderChunk, error)
 }
 
 func (m *mockExternalProvider) Name() string { return m.name }
@@ -62,6 +63,9 @@ func (m *mockExternalProvider) GetAppSchema(ctx context.Context, appID string) (
 	return []byte(`{"version":"1","schema":[{"id":"param1"}]}`), nil
 }
 func (m *mockExternalProvider) RenderAppChunks(ctx context.Context, req providers.RenderRequest) ([]providers.RenderChunk, error) {
+	if m.renderFunc != nil {
+		return m.renderFunc(ctx, req)
+	}
 	return m.chunks, nil
 }
 
@@ -889,4 +893,58 @@ func TestMultiChunk_WebSocketPreviewPlayback(t *testing.T) {
 	// Second binary message must be chunk 1
 	b1 := readNextBinary()
 	assert.Equal(t, dummyChunkWebP3, b1, "WS client must receive chunk 1 next")
+}
+
+func TestScreenyProceduralApp_ReRendersOnDwellRotationRegardlessOfUInterval(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "screenyuser"}
+	require.NoError(t, gorm.G[data.User](s.DB).Create(ctx, &user))
+
+	device := data.Device{
+		ID:              "dev_screeny_loop",
+		Username:        user.Username,
+		Name:            "Screeny Dev",
+		Brightness:      50,
+		DefaultInterval: 15,
+	}
+	require.NoError(t, gorm.G[data.Device](s.DB).Create(ctx, &device))
+
+	// Mock Screeny provider
+	renderCallCount := 0
+	mock := &mockExternalProvider{
+		name: "screeny",
+		renderFunc: func(ctx context.Context, req providers.RenderRequest) ([]providers.RenderChunk, error) {
+			renderCallCount++
+			return []providers.RenderChunk{
+				{WebPBytes: dummyChunkWebP1, DurationMs: 15000},
+			}, nil
+		},
+	}
+	s.RegisterExternalProvider(mock)
+
+	path := "screeny:flock"
+	// App has default UInterval=10 (minutes) as stored by DB on addapp
+	app := data.App{
+		DeviceID:   device.ID,
+		Iname:      "flock_app",
+		Name:       "Flock",
+		Enabled:    true,
+		Path:       &path,
+		UInterval:  10,                                // Default 10 minutes from DB
+		LastRender: time.Now().Add(-20 * time.Second), // 20s ago (greater than 15s dwell)
+	}
+	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &app))
+
+	// 1. Dwell elapsed (20s > 15s): possiblyRender MUST trigger re-render despite UInterval=10
+	rendered := s.possiblyRender(ctx, &app, &device, &user)
+	assert.True(t, rendered)
+	assert.Equal(t, 1, renderCallCount, "Screeny app must re-render once dwell time has elapsed, ignoring 10-minute UInterval")
+
+	// 2. Dwell NOT elapsed (e.g. 2s since render): possiblyRender must skip re-render
+	app.LastRender = time.Now().Add(-2 * time.Second)
+	rendered = s.possiblyRender(ctx, &app, &device, &user)
+	assert.True(t, rendered)
+	assert.Equal(t, 1, renderCallCount, "Screeny app must not re-render if dwell time has not yet elapsed")
 }
