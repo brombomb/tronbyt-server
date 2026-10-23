@@ -463,7 +463,7 @@ func (a *AwtrixAdapter) RenderAppChunks(ctx context.Context, req providers.Rende
 	}
 
 	// 5. Partition frames into WebP chunk(s)
-	return screeny.SplitFramesIntoChunks(frames, fps, req.MaxChunkSize, req.MaxChunkDurationMs)
+	return screeny.SplitFramesIntoChunksWithDuration(frames, fps, req.MaxChunkSize, req.MaxChunkDurationMs, durationMs)
 }
 
 type layoutInfo struct {

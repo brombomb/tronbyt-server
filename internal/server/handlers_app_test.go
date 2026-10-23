@@ -1199,17 +1199,25 @@ func TestExternalAppUIntervalFallbackAndNonBlockingAdd(t *testing.T) {
 
 	// Test 2: In-flight deduplication in possiblyRender
 	appKey := fmt.Sprintf("%s:%s", device.ID, savedApp.Iname)
+	doneCh := make(chan struct{})
 	s.inFlightRendersMu.Lock()
-	s.inFlightRenders[appKey] = true
+	s.inFlightRenders[appKey] = doneCh
 	s.inFlightRendersMu.Unlock()
 
-	// While in flight, possiblyRender should return true immediately without rendering
+	// Simulate in-flight render completing and saving chunks
+	go func() {
+		_ = s.saveAppChunks(device.ID, &savedApp, []providers.RenderChunk{
+			{WebPBytes: []byte("fake_webp"), DurationMs: 15000},
+		})
+		s.inFlightRendersMu.Lock()
+		delete(s.inFlightRenders, appKey)
+		close(doneCh)
+		s.inFlightRendersMu.Unlock()
+	}()
+
+	// While in flight, possiblyRender should wait for completion and return true without triggering a second render
 	rendered := s.possiblyRender(context.Background(), &savedApp, &device, &user)
 	assert.True(t, rendered)
-
-	s.inFlightRendersMu.Lock()
-	delete(s.inFlightRenders, appKey)
-	s.inFlightRendersMu.Unlock()
 
 	// Wait for any background renders to complete before test cleanup
 	s.backgroundRenders.Wait()
@@ -1379,7 +1387,9 @@ func TestExternalAppThumbnail_CacheInvalidationOnV7(t *testing.T) {
 	_, errV7 := os.Stat(filepath.Join(cacheDir, ".previews_v7"))
 	assert.True(t, os.IsNotExist(errV7))
 	_, errV8 := os.Stat(filepath.Join(cacheDir, ".previews_v8"))
-	assert.NoError(t, errV8)
+	assert.True(t, os.IsNotExist(errV8))
+	_, errV9 := os.Stat(filepath.Join(cacheDir, ".previews_v9"))
+	assert.NoError(t, errV9)
 
 	// Verify app's LastRender was reset to zero time
 	var updatedApp data.App

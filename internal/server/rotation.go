@@ -77,7 +77,7 @@ func (s *Server) GetNextAppImageHTTP(ctx context.Context, device *data.Device, u
 					delete(s.deviceChunkIndices, device.ID)
 					s.deviceChunkMu.Unlock()
 				} else {
-					dwell := max(1, chunk.DurationMs/1000)
+					dwell := max(1, (chunk.DurationMs+500)/1000)
 
 					s.deviceChunkMu.Lock()
 					nextIdx := currIdx + 1
@@ -122,7 +122,7 @@ func (s *Server) GetNextAppImageHTTP(ctx context.Context, device *data.Device, u
 			s.deviceChunkMu.Unlock()
 		}
 		chunk0 := chunks[0]
-		dwell := max(1, chunk0.DurationMs/1000)
+		dwell := max(1, (chunk0.DurationMs+500)/1000)
 		return chunk0.WebPBytes, app, dwell, nil
 	}
 
@@ -209,6 +209,16 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 	if err != nil || app == nil {
 		slog.Debug("No valid app found (e.g. all disabled or scheduled out), returning default image", "device", device.ID, "error", err)
 		return getDefaultImage()
+	}
+
+	if app.Path != nil && s.isExternalAppPath(*app.Path) {
+		appKey := fmt.Sprintf("%s:%s", device.ID, app.Iname)
+		s.inFlightRendersMu.Lock()
+		if s.appRenderServed == nil {
+			s.appRenderServed = make(map[string]bool)
+		}
+		s.appRenderServed[appKey] = true
+		s.inFlightRendersMu.Unlock()
 	}
 
 	// 5. Save State

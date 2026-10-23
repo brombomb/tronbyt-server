@@ -59,6 +59,7 @@ type ScreenyAdapter struct {
 	// Active patch tracking to preserve continuous procedural animation streams
 	activePatchMu sync.Mutex
 	activePatchID string
+	lastParams    map[string]float32
 }
 
 // NewAdapter creates a new ScreenyAdapter with the provided configuration.
@@ -225,11 +226,20 @@ func (a *ScreenyAdapter) RenderAppChunks(ctx context.Context, req providers.Rend
 	patchChanged := a.activePatchID != req.AppID
 	if patchChanged {
 		a.activePatchID = req.AppID
+		a.lastParams = make(map[string]float32)
+	}
+	if a.lastParams == nil {
+		a.lastParams = make(map[string]float32)
 	}
 	a.activePatchMu.Unlock()
 
 	if patchChanged {
 		if err := a.activatePatch(ctx, req.AppID); err != nil {
+			a.activePatchMu.Lock()
+			if a.activePatchID == req.AppID {
+				a.activePatchID = ""
+			}
+			a.activePatchMu.Unlock()
 			return nil, fmt.Errorf("activating patch %s: %w", req.AppID, err)
 		}
 	}
@@ -239,20 +249,37 @@ func (a *ScreenyAdapter) RenderAppChunks(ctx context.Context, req providers.Rend
 		scaleFilter = sf
 	}
 
-	// 2. Apply config parameters
+	// 2. Apply config parameters only when changed or on patch switch
 	for paramID, val := range req.Config {
 		if paramID == "scale_filter" {
 			continue // Handled internally by server-side scaling pipeline
 		}
 		if fVal, ok := parseParamValue(val); ok {
-			if err := a.setParam(ctx, paramID, fVal); err != nil {
-				slog.Warn("Failed to set screeny parameter", "param", paramID, "value", fVal, "error", err)
+			a.activePatchMu.Lock()
+			prevVal, exists := a.lastParams[paramID]
+			needsSet := patchChanged || !exists || prevVal != fVal
+			a.activePatchMu.Unlock()
+			if needsSet {
+				if err := a.setParam(ctx, paramID, fVal); err != nil {
+					slog.Warn("Failed to set screeny parameter", "param", paramID, "value", fVal, "error", err)
+				} else {
+					a.activePatchMu.Lock()
+					a.lastParams[paramID] = fVal
+					a.activePatchMu.Unlock()
+				}
 			}
 		}
 	}
 
-	// 3. Connect to screeny-studio WebSocket preview stream and capture frames
-	frames, err := a.captureFrames(ctx, fps, durationMs, req.Width, req.Height, scaleFilter, patchChanged)
+	// 3. Connect to screeny-studio WebSocket preview stream and capture frames.
+	// For full renders (>= 5000ms), reserve ~1.2s of pipeline headroom so live capture +
+	// lossless WebP encoding + WebSocket transmission finishes before the previous cycle's
+	// dwell_secs expires on the device, preventing buffer starvation and frame looping.
+	captureDurationMs := durationMs
+	if durationMs >= 5000 {
+		captureDurationMs = max(durationMs-1200, durationMs*85/100)
+	}
+	frames, err := a.captureFrames(ctx, fps, captureDurationMs, req.Width, req.Height, scaleFilter, patchChanged)
 	if err != nil {
 		return nil, fmt.Errorf("capturing screeny frames: %w", err)
 	}
@@ -261,8 +288,8 @@ func (a *ScreenyAdapter) RenderAppChunks(ctx context.Context, req providers.Rend
 		return nil, errors.New("captured zero frames from screeny-studio")
 	}
 
-	// 4. Split captured frames into animated WebP chunks
-	return SplitFramesIntoChunks(frames, fps, maxChunkSize, req.MaxChunkDurationMs)
+	// 4. Split captured frames into animated WebP chunks paced across durationMs
+	return SplitFramesIntoChunksWithDuration(frames, fps, maxChunkSize, req.MaxChunkDurationMs, durationMs)
 }
 
 // fetchBootstrap calls GET /api/v1/bootstrap on screeny-studio.

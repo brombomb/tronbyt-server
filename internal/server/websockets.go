@@ -198,6 +198,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 				if _, err := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).Update(context.Background(), "info", device.Info); err != nil {
 					slog.Error("Failed to update device info", "error", err)
+				} else {
+					s.Broadcaster.Notify(device.ID, nil)
 				}
 			}
 
@@ -210,6 +212,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 					device.Info.ProtocolVersion = &newVersion
 					if _, err := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).Update(context.Background(), "info", device.Info); err != nil {
 						slog.Error("Failed to update device info (protocol version)", "error", err)
+					} else {
+						s.Broadcaster.Notify(device.ID, nil)
 					}
 				}
 			}
@@ -270,7 +274,7 @@ func (s *Server) wsWriteLoop(ctx context.Context, conn *websocket.Conn, initialD
 				}
 			drainedPreview:
 
-				chunkDwell := max(1, chunk.DurationMs/1000)
+				chunkDwell := max(1, (chunk.DurationMs+500)/1000)
 				if err := conn.WriteJSON(map[string]any{"dwell_secs": chunkDwell}); err != nil {
 					slog.Error("Failed to write metadata WS message for preview chunk", "chunk", chunkIdx, "error", err)
 					return
@@ -510,7 +514,7 @@ func (s *Server) wsWriteLoop(ctx context.Context, conn *websocket.Conn, initialD
 					}
 				drained:
 
-					chunkDwell := max(1, chunk.DurationMs/1000)
+					chunkDwell := max(1, (chunk.DurationMs+500)/1000)
 					if err := conn.WriteJSON(map[string]any{"dwell_secs": chunkDwell}); err != nil {
 						slog.Error("Failed to write metadata WS message for chunk", "chunk", chunkIdx, "error", err)
 						return
@@ -579,6 +583,16 @@ func (s *Server) wsWriteLoop(ctx context.Context, conn *websocket.Conn, initialD
 									}
 									if user != nil {
 										s.notifyDashboard(user.Username, WSEvent{Type: "image_updated", DeviceID: device.ID})
+									}
+									// Pre-render the next cycle in the background while the remaining chunks of this cycle play
+									if app.Path != nil && s.isExternalAppPath(*app.Path) {
+										appCopy := *app
+										devCopy := device
+										s.backgroundRenders.Go(func() {
+											bgCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+											defer cancel()
+											s.possiblyRender(bgCtx, &appCopy, &devCopy, user)
+										})
 									}
 								}
 								if device.Info.ProtocolVersion != nil {

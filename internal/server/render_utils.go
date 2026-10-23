@@ -115,41 +115,50 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 	if provider, appID, ok := s.parseExternalAppPath(*app.Path); ok {
 		appKey := fmt.Sprintf("%s:%s", device.ID, app.Iname)
 		s.inFlightRendersMu.Lock()
+		if s.inFlightRenders == nil {
+			s.inFlightRenders = make(map[string]chan struct{})
+		}
 		if s.renderPending == nil {
 			s.renderPending = make(map[string]bool)
 		}
-
-		forceRender := s.filtersChangedSinceLastRender(device, app) || app.LastRender.IsZero()
-		if s.inFlightRenders[appKey] {
-			if forceRender {
-				s.renderPending[appKey] = true
-			}
-			s.inFlightRendersMu.Unlock()
-			slog.Debug("Render already in flight for external app, skipping redundant trigger", "app", appBasename)
-			return true
+		if s.appRenderServed == nil {
+			s.appRenderServed = make(map[string]bool)
 		}
-		s.inFlightRenders[appKey] = true
+
+		if waitCh, inFlight := s.inFlightRenders[appKey]; inFlight {
+			s.inFlightRendersMu.Unlock()
+			slog.Debug("Render already in flight for external app, waiting for completion", "app", appBasename)
+			select {
+			case <-waitCh:
+			case <-ctx.Done():
+			}
+			return len(s.getAppChunks(device.ID, app)) > 0
+		}
+		doneCh := make(chan struct{})
+		s.inFlightRenders[appKey] = doneCh
+		alreadyServed := s.appRenderServed[appKey]
 		s.inFlightRendersMu.Unlock()
 		defer func() {
 			s.inFlightRendersMu.Lock()
 			delete(s.inFlightRenders, appKey)
+			close(doneCh)
 			isPending := s.renderPending[appKey]
 			delete(s.renderPending, appKey)
 			s.inFlightRendersMu.Unlock()
 
 			if isPending {
 				s.backgroundRenders.Go(func() {
-					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					bgCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 					defer cancel()
 					var latestApp data.App
 					if err := s.DB.Where("id = ?", app.ID).First(&latestApp).Error; err == nil {
-						s.possiblyRender(ctx, &latestApp, device, user)
+						s.possiblyRender(bgCtx, &latestApp, device, user)
 					}
 				})
 			}
 		}()
 
-		now := time.Now()
+		forceRender := s.filtersChangedSinceLastRender(device, app) || app.LastRender.IsZero()
 		dwellSecs := 15
 		if device != nil {
 			dwellSecs = device.GetEffectiveDwellTime(app)
@@ -161,14 +170,16 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 		// Refresh cadence:
 		// Screeny procedural simulations (e.g. Flock, Overland, Knot) generate continuous frames
 		// on each rotation cycle based on dwell time, regardless of database UInterval (which defaults to 10m).
-		// Other external providers respect UInterval if positive, otherwise falling back to dwell duration.
+		// Once a rendered batch has been served to a device (alreadyServed), the next rotation cycle must
+		// render a fresh continuation batch so the animation never loops the same clip twice.
+		hasCachedChunks := len(s.getAppChunks(device.ID, app)) > 0
 		renderExpired := false
 		if provider.Name() == "screeny" {
-			renderExpired = time.Since(app.LastRender) >= time.Duration(max(1, dwellSecs-1))*time.Second
+			renderExpired = !hasCachedChunks || alreadyServed || time.Since(app.LastRender) >= time.Duration(max(1, dwellSecs-1))*time.Second
 		} else if app.UInterval > 0 {
-			renderExpired = time.Since(app.LastRender) > time.Duration(app.UInterval)*time.Minute
+			renderExpired = !hasCachedChunks || time.Since(app.LastRender) > time.Duration(app.UInterval)*time.Minute
 		} else {
-			renderExpired = time.Since(app.LastRender) >= time.Duration(max(1, dwellSecs-1))*time.Second
+			renderExpired = !hasCachedChunks || alreadyServed || time.Since(app.LastRender) >= time.Duration(max(1, dwellSecs-1))*time.Second
 		}
 
 		maxChunkSize := s.GetMaxChunkSizeForDevice(device)
@@ -225,6 +236,7 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 
 			chunks, err := provider.RenderAppChunks(ctx, req)
 			renderDur := time.Since(startTime)
+			completedAt := time.Now()
 			s.metrics.renderDuration.Observe(renderDur.Seconds())
 
 			if err != nil || len(chunks) == 0 {
@@ -232,7 +244,7 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 				slog.Error("Error rendering external app", "provider", provider.Name(), "app", appBasename, "error", err)
 
 				// Update in-memory timestamps so erroring apps don't hammer the provider in a tight loop
-				app.LastRender = now
+				app.LastRender = completedAt
 				app.LastRenderDur = renderDur
 				app.EmptyLastRender = true
 
@@ -244,7 +256,7 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 
 				// Record failed render in DB
 				appUpdates := data.App{
-					LastRender:      now,
+					LastRender:      completedAt,
 					LastRenderDur:   renderDur,
 					EmptyLastRender: true,
 				}
@@ -260,11 +272,14 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 			if err := s.saveAppChunks(device.ID, app, chunks); err != nil {
 				slog.Error("Failed to save external app chunks", "app", appBasename, "error", err)
 			}
+			s.inFlightRendersMu.Lock()
+			s.appRenderServed[appKey] = false
+			s.inFlightRendersMu.Unlock()
 
 			// Atomic DB update
 			appUpdates := data.App{
-				LastRender:           now,
-				LastSuccessfulRender: &now,
+				LastRender:           completedAt,
+				LastSuccessfulRender: &completedAt,
 				LastRenderDur:        renderDur,
 				EmptyLastRender:      false,
 			}
@@ -278,16 +293,13 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 				return false
 			}
 
-			app.LastRender = now
-			app.LastSuccessfulRender = &now
+			app.LastRender = completedAt
+			app.LastSuccessfulRender = &completedAt
 			app.LastRenderDur = renderDur
 			app.EmptyLastRender = false
 
 			if app.AutoPin {
 				s.handleAutoPin(ctx, app, device, user, true)
-			}
-			if user != nil && device != nil {
-				s.notifyDashboard(user.Username, WSEvent{Type: "image_updated", DeviceID: device.ID})
 			}
 			return true
 		}

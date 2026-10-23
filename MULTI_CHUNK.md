@@ -141,10 +141,10 @@ When a user clicks **"Preview on Device"**:
 
 | Device Type | Identifiers | Max Chunk Size | Max Chunk Duration | Target Firmware Buffer |
 | :--- | :--- | :--- | :--- | :--- |
-| **Raspberry Pi / Tronberry** | `DeviceRaspberryPi*`, `DeviceTronberry*` | **5,242,880 B** (5 MB) | No duration limit | Unlimited |
-| **ESP32-S3 & Matrix Wide** | `DeviceTronbytS3Wide`, `DeviceMatrixPortalWide`, `DeviceMatrixPortalSquare`, `DeviceTronbytS3`, `DeviceMatrixPortal`, `DeviceWaveshareS3`, `DeviceTidbytGen2` | **450,000 B** (450 KB) | 5,000 ms (5s) | 460,000 B |
-| **Tidbyt Gen 1 & Standard ESP32** | `DeviceTidbytGen1`, `DeviceMatrixPortalWS` | **160,000 B** (160 KB) | 5,000 ms (5s) | 220,000 B |
-| **Pixoticker** | `DevicePixoticker` | **50,000 B** (50 KB) | 5,000 ms (5s) | 60,000 B |
+| **Raspberry Pi / Tronberry** | `DeviceRaspberryPi*`, `DeviceTronberry*` | **5,242,880 B** (5 MB) | No duration limit (`0`) | Unlimited |
+| **ESP32-S3 & Matrix Wide** | `DeviceTronbytS3Wide`, `DeviceMatrixPortalWide`, `DeviceMatrixPortalSquare`, `DeviceTronbytS3`, `DeviceMatrixPortal`, `DeviceWaveshareS3`, `DeviceTidbytGen2` | **450,000 B** (450 KB) | Governed by byte budget (`0`) | 460,000 B |
+| **Tidbyt Gen 1 & Standard ESP32** | `DeviceTidbytGen1`, `DeviceMatrixPortalWS` | **160,000 B** (160 KB) | Governed by byte budget (`0`) | 220,000 B |
+| **Pixoticker** | `DevicePixoticker` | **50,000 B** (50 KB) | Governed by byte budget (`0`) | 60,000 B |
 
 ---
 

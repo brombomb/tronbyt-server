@@ -79,7 +79,7 @@ func TestDeviceMaxChunkSize_ESP_vs_RPi(t *testing.T) {
 		Type: data.DeviceTidbytGen1,
 	}
 	assert.Equal(t, 160000, s.GetMaxChunkSizeForDevice(espDevice))
-	assert.Equal(t, 5000, s.GetMaxChunkDurationForDevice(espDevice))
+	assert.Equal(t, 0, s.GetMaxChunkDurationForDevice(espDevice))
 
 	// When config setting is 0, Tidbyt Gen 1 defaults to 160000
 	s.Config.ScreenyMaxWebPBytesESP = 0
@@ -92,7 +92,7 @@ func TestDeviceMaxChunkSize_ESP_vs_RPi(t *testing.T) {
 		Type: data.DeviceMatrixPortal,
 	}
 	assert.Equal(t, 450000, s.GetMaxChunkSizeForDevice(matrixDevice))
-	assert.Equal(t, 5000, s.GetMaxChunkDurationForDevice(matrixDevice))
+	assert.Equal(t, 0, s.GetMaxChunkDurationForDevice(matrixDevice))
 
 	wideDevice := &data.Device{
 		ID:   "wide1",
@@ -942,9 +942,22 @@ func TestScreenyProceduralApp_ReRendersOnDwellRotationRegardlessOfUInterval(t *t
 	assert.True(t, rendered)
 	assert.Equal(t, 1, renderCallCount, "Screeny app must re-render once dwell time has elapsed, ignoring 10-minute UInterval")
 
-	// 2. Dwell NOT elapsed (e.g. 2s since render): possiblyRender must skip re-render
+	// 2. Dwell NOT elapsed (e.g. 2s since render) and not yet served: possiblyRender must skip re-render
 	app.LastRender = time.Now().Add(-2 * time.Second)
 	rendered = s.possiblyRender(ctx, &app, &device, &user)
 	assert.True(t, rendered)
-	assert.Equal(t, 1, renderCallCount, "Screeny app must not re-render if dwell time has not yet elapsed")
+	assert.Equal(t, 1, renderCallCount, "Screeny app must not re-render if dwell time has not yet elapsed and render has not been served")
+
+	// 3. Once served via GetNextAppImage, the next rotation cycle must immediately render a fresh batch
+	device.Apps = []*data.App{&app}
+	_, servedApp, err := s.GetNextAppImage(ctx, &device, &user, "")
+	require.NoError(t, err)
+	require.NotNil(t, servedApp)
+	assert.Equal(t, 1, renderCallCount, "Serving unconsumed render uses cached batch")
+
+	// Immediate pre-fetch for the next cycle (as done by wsWriteLoop upon displaying ACK) must render fresh frames
+	_, servedApp2, err := s.GetNextAppImage(ctx, &device, &user, "")
+	require.NoError(t, err)
+	require.NotNil(t, servedApp2)
+	assert.Equal(t, 2, renderCallCount, "Next cycle pre-fetch must generate a fresh continuation batch instead of repeating cached clip")
 }
