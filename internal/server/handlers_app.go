@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -423,15 +424,27 @@ const externalAppThumbnailDurationMs = 3000
 
 func (s *Server) ensureCleanPreviewCache(providerName string) string {
 	cacheDir := filepath.Join(s.DataDir, "cache", "previews", providerName)
-	markerFile := filepath.Join(cacheDir, ".previews_v4")
+	markerFile := filepath.Join(cacheDir, ".previews_v9")
 	if _, err := os.Stat(markerFile); os.IsNotExist(err) {
 		_ = os.RemoveAll(cacheDir)
 		_ = os.MkdirAll(cacheDir, 0755)
-		_ = os.WriteFile(markerFile, []byte("v4"), 0644)
+		_ = os.WriteFile(markerFile, []byte("v9"), 0644)
 
 		s.appChunksMu.Lock()
 		s.appChunksCache = make(map[string][]providers.RenderChunk)
 		s.appChunksMu.Unlock()
+
+		// Clean up any stale _full.webp or chunk files on disk so full-dwell renders regenerate cleanly
+		if fullFiles, err := filepath.Glob(filepath.Join(s.DataDir, "webp", "*", "*_full.webp")); err == nil {
+			for _, f := range fullFiles {
+				_ = os.Remove(f)
+			}
+		}
+		if chunkFiles, err := filepath.Glob(filepath.Join(s.DataDir, "webp", "*", "*_chunk*")); err == nil {
+			for _, f := range chunkFiles {
+				_ = os.Remove(f)
+			}
+		}
 
 		if s.DB != nil {
 			_, _ = gorm.G[data.App](s.DB).Where("path LIKE ?", providerName+":%").
@@ -845,20 +858,31 @@ func (s *Server) handleConfigAppPost(w http.ResponseWriter, r *http.Request) {
 
 	// Trigger Render
 	if app.Path != nil && s.isExternalAppPath(*app.Path) {
+		appKey := fmt.Sprintf("%s:%s", device.ID, app.Iname)
+		s.inFlightRendersMu.Lock()
+		if s.renderPending == nil {
+			s.renderPending = make(map[string]bool)
+		}
+		if _, inFlight := s.inFlightRenders[appKey]; inFlight {
+			s.renderPending[appKey] = true
+		}
+		s.inFlightRendersMu.Unlock()
+
+		appCopy := *app
+		devCopy := *device
+		userCopy := *user
 		s.backgroundRenders.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
-			s.possiblyRender(ctx, app, device, user)
-			s.notifyDashboard(user.Username, WSEvent{Type: "apps_changed", DeviceID: device.ID})
-			s.notifyDashboard(user.Username, WSEvent{Type: "image_updated", DeviceID: device.ID})
+			s.possiblyRender(ctx, &appCopy, &devCopy, &userCopy)
+			s.notifyDashboard(userCopy.Username, WSEvent{Type: "apps_changed", DeviceID: devCopy.ID})
+			s.notifyDashboard(userCopy.Username, WSEvent{Type: "image_updated", DeviceID: devCopy.ID})
 		})
 	} else {
 		s.possiblyRender(r.Context(), app, device, user)
+		s.notifyDashboard(user.Username, WSEvent{Type: "apps_changed", DeviceID: device.ID})
+		s.notifyDashboard(user.Username, WSEvent{Type: "image_updated", DeviceID: device.ID})
 	}
-
-	// Notify Dashboard & Device
-	s.notifyDashboard(user.Username, WSEvent{Type: "apps_changed", DeviceID: device.ID})
-	s.notifyDashboard(user.Username, WSEvent{Type: "image_updated", DeviceID: device.ID})
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -1000,6 +1024,19 @@ func (s *Server) handleRenderConfigPreview(w http.ResponseWriter, r *http.Reques
 			if err != nil {
 				http.Error(w, "Invalid external app ID", http.StatusBadRequest)
 				return
+			}
+			// If the app has already been rendered with this exact saved config, serve existing full-dwell preview
+			if !app.LastRender.IsZero() && reflect.DeepEqual(configData, app.Config) {
+				deviceWebpDir, err := s.ensureDeviceImageDir(device.ID)
+				if err == nil {
+					fullPath := filepath.Join(deviceWebpDir, fmt.Sprintf("%s-%s_full.webp", app.Name, app.Iname))
+					if b, err := os.ReadFile(fullPath); err == nil && len(b) > 0 {
+						w.Header().Set("Content-Type", "image/webp")
+						w.Header().Set("Cache-Control", "no-cache")
+						_, _ = w.Write(b)
+						return
+					}
+				}
 			}
 			width, height := device.Type.CanvasSize()
 			if device.Type.Supports2x() {

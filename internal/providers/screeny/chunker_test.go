@@ -117,3 +117,28 @@ func TestChunker_DurationConstraint(t *testing.T) {
 	}
 	assert.NotEmpty(t, chunks[0].FullWebPBytes)
 }
+
+func TestChunker_WithTargetDuration_PacedAndBalanced(t *testing.T) {
+	// 120 frames captured for a 5000ms target dwell window
+	frames := generateRandomFrames(120, 64, 32, 101)
+	maxChunkSize := 5 * 1024 * 1024
+
+	chunks, err := SplitFramesIntoChunksWithDuration(frames, 30, maxChunkSize, 0, 5000)
+	require.NoError(t, err)
+	require.Len(t, chunks, 1)
+	assert.Equal(t, 5000, chunks[0].DurationMs, "single chunk DurationMs must match exact integer-second target")
+
+	// Constrained byte budget splits into balanced integer-second chunks summing to 5000ms
+	constrainedBudget := len(chunks[0].WebPBytes) * 2 / 3
+	splitChunks, err := SplitFramesIntoChunksWithDuration(frames, 30, constrainedBudget, 0, 5000)
+	require.NoError(t, err)
+	require.Len(t, splitChunks, 2, "should split into 2 balanced chunks")
+
+	totalDur := 0
+	for i, ch := range splitChunks {
+		assert.LessOrEqual(t, len(ch.WebPBytes), constrainedBudget)
+		assert.Equal(t, 0, ch.DurationMs%1000, "chunk %d DurationMs must be an exact multiple of 1000ms", i)
+		totalDur += ch.DurationMs
+	}
+	assert.Equal(t, 5000, totalDur, "sum of split chunk durations must equal target duration")
+}

@@ -73,8 +73,9 @@ type Server struct {
 	deviceChunkIndices    map[string]int
 	deviceCurrentChunkApp map[string]string
 	deviceChunkMu         sync.Mutex
-	inFlightRenders       map[string]bool
+	inFlightRenders       map[string]chan struct{}
 	renderPending         map[string]bool
+	appRenderServed       map[string]bool
 	inFlightRendersMu     sync.Mutex
 	thumbnailSingleFlight singleflight.Group
 
@@ -137,8 +138,9 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 		appChunksCache:        make(map[string][]providers.RenderChunk),
 		deviceChunkIndices:    make(map[string]int),
 		deviceCurrentChunkApp: make(map[string]string),
-		inFlightRenders:       make(map[string]bool),
+		inFlightRenders:       make(map[string]chan struct{}),
 		renderPending:         make(map[string]bool),
+		appRenderServed:       make(map[string]bool),
 	}
 
 	// Load Settings from DB
@@ -619,21 +621,11 @@ func (s *Server) GetMaxChunkSizeForDevice(device *data.Device) int {
 }
 
 // GetMaxChunkDurationForDevice returns the maximum duration in ms per chunk based on device type.
-// For ESP32-based devices (e.g. Tidbyt Gen1/Gen2, Tronbyt S3, MatrixPortal), large WebPs with
-// hundreds of frames overwhelm the hardware demuxer and memory. Capping chunks at 5000ms (5s)
-// ensures smooth sequential playback without device buffer exhaustion.
-// For Raspberry Pi / Tronberry devices, 0 is returned (no duration limit).
+// Hardware buffer safety is governed by GetMaxChunkSizeForDevice (160 KB for classic ESP32,
+// 450 KB for ESP32-S3/Gen2, 50 KB for Pixoticker, 5 MB for RPi/Tronberry). Returning 0 avoids
+// artificially chopping animations that already fit within the device's byte budget into 5s clips.
 func (s *Server) GetMaxChunkDurationForDevice(device *data.Device) int {
-	if device == nil {
-		return 5000
-	}
-	if device.Type == data.DeviceRaspberryPi ||
-		device.Type == data.DeviceRaspberryPiWide ||
-		device.Type == data.DeviceRaspberryPiSquare ||
-		strings.EqualFold(device.Info.FirmwareType, "Tronberry") {
-		return 0
-	}
-	return 5000
+	return 0
 }
 
 func (s *Server) invalidateAppChunks(deviceID string, iname string) {
@@ -641,6 +633,11 @@ func (s *Server) invalidateAppChunks(deviceID string, iname string) {
 	s.appChunksMu.Lock()
 	delete(s.appChunksCache, key)
 	s.appChunksMu.Unlock()
+	s.inFlightRendersMu.Lock()
+	if s.appRenderServed != nil {
+		delete(s.appRenderServed, key)
+	}
+	s.inFlightRendersMu.Unlock()
 }
 
 type chunkMeta struct {
