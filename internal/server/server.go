@@ -66,6 +66,8 @@ type Server struct {
 	systemAppsRefreshMutex               sync.Mutex
 	systemAppsAutoRefreshPreferenceMutex sync.Mutex
 	systemAppsAutoRefresh                atomic.Bool
+	nibletCloudPreferenceMutex           sync.Mutex
+	nibletCloudEnabled                   atomic.Bool
 
 	externalProviders     map[string]providers.ExternalAppProvider
 	externalProvidersMu   sync.RWMutex
@@ -172,6 +174,8 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 		cfg.SystemAppsAutoRefresh = val == "true"
 	}
 	s.systemAppsAutoRefresh.Store(cfg.SystemAppsAutoRefresh)
+
+	s.loadNibletCloudEnabled()
 
 	// Screeny Studio Settings from DB or env
 	if val, err := s.getSetting("screeny_studio_url"); err == nil && val != "" {
