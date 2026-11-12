@@ -1560,7 +1560,7 @@ func TestHandleAddAppGet_PreviewTypeDefault(t *testing.T) {
 	rr1x := httptest.NewRecorder()
 	s.handleAddAppGet(rr1x, req1x.WithContext(ctx1x))
 	assert.Equal(t, http.StatusOK, rr1x.Code)
-	assert.Contains(t, rr1x.Body.String(), `<option value="1x" selected>`)
+	assert.Regexp(t, `value="1x"[^>]*selected`, rr1x.Body.String())
 
 	// 2. Square device defaults to square preview
 	reqSq, _ := http.NewRequest(http.MethodGet, "/devices/devSquare/addapp", nil)
@@ -1570,7 +1570,7 @@ func TestHandleAddAppGet_PreviewTypeDefault(t *testing.T) {
 	rrSq := httptest.NewRecorder()
 	s.handleAddAppGet(rrSq, reqSq.WithContext(ctxSq))
 	assert.Equal(t, http.StatusOK, rrSq.Code)
-	assert.Contains(t, rrSq.Body.String(), `<option value="square" selected>`)
+	assert.Regexp(t, `value="square"[^>]*selected`, rrSq.Body.String())
 
 	// 3. 2x device defaults to 2x preview
 	req2x, _ := http.NewRequest(http.MethodGet, "/devices/dev2x/addapp", nil)
@@ -1580,7 +1580,7 @@ func TestHandleAddAppGet_PreviewTypeDefault(t *testing.T) {
 	rr2x := httptest.NewRecorder()
 	s.handleAddAppGet(rr2x, req2x.WithContext(ctx2x))
 	assert.Equal(t, http.StatusOK, rr2x.Code)
-	assert.Contains(t, rr2x.Body.String(), `<option value="2x" selected>`)
+	assert.Regexp(t, `value="2x"[^>]*selected`, rr2x.Body.String())
 
 	// 4. Override with query param ?preview=square on 1x device
 	reqOverride, _ := http.NewRequest(http.MethodGet, "/devices/dev1x/addapp?preview=square", nil)
@@ -1590,5 +1590,5 @@ func TestHandleAddAppGet_PreviewTypeDefault(t *testing.T) {
 	rrOverride := httptest.NewRecorder()
 	s.handleAddAppGet(rrOverride, reqOverride.WithContext(ctxOverride))
 	assert.Equal(t, http.StatusOK, rrOverride.Code)
-	assert.Contains(t, rrOverride.Body.String(), `<option value="square" selected>`)
+	assert.Regexp(t, `value="square"[^>]*selected`, rrOverride.Body.String())
 }

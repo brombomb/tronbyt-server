@@ -424,7 +424,7 @@ func (s *Server) handleAppThumbnail(w http.ResponseWriter, r *http.Request) {
 			file = appMeta.Preview
 		}
 	case "2x":
-		if appMeta.Supports2x && appMeta.Preview2x != "" {
+		if appMeta.Preview2x != "" {
 			file = appMeta.Preview2x
 		} else if appMeta.Preview != "" {
 			file = appMeta.Preview

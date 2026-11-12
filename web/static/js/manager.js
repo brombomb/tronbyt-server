@@ -673,8 +673,8 @@ function changePreviewType(newType) {
     console.error('Failed to update URL:', e);
   }
 
-  // Update preview URL for each image
-  const updateUrl = (rawUrl) => {
+  // Helper to update query string on image URLs
+  const updateUrl = (rawUrl, asFullUrl = false) => {
     try {
       const u = new URL(rawUrl, window.location.origin);
       u.searchParams.set('preview', newType);
@@ -683,41 +683,66 @@ function changePreviewType(newType) {
       } else {
         u.searchParams.delete('square');
       }
-      return u.pathname + u.search;
+      return asFullUrl ? u.toString() : (u.pathname + u.search);
     } catch (e) {
       return rawUrl;
     }
   };
 
-  document.querySelectorAll('.app-item .app-img').forEach(container => {
-    const img = container.querySelector('img');
-    if (!img) return;
+  document.querySelectorAll('.app-item').forEach(appItem => {
+    const container = appItem.querySelector('.app-img');
+    if (!container) return;
 
-    if (newType !== 'square') {
+    const supports2x = appItem.dataset.supports2x === 'true';
+    const supportsSquare = appItem.dataset.supportsSquare === 'true';
+
+    // Synchronously update container dot mask classes based on target resolution and capability
+    if (newType === '2x' && supports2x) {
+      container.classList.add('is-2x');
+      container.classList.remove('is-square');
+    } else if (newType === 'square' && supportsSquare) {
+      container.classList.add('is-square');
+      container.classList.remove('is-2x');
+    } else {
+      container.classList.remove('is-2x');
       container.classList.remove('is-square');
     }
 
+    const img = container.querySelector('img');
+    if (!img) return;
+
     if (img.dataset.src) {
-      img.dataset.src = updateUrl(img.dataset.src);
+      img.dataset.src = updateUrl(img.dataset.src, false);
     }
     if (img.src) {
-      const skeleton = container.querySelector('.skeleton-loader');
-      if (skeleton) {
-        skeleton.style.display = '';
+      const newSrc = updateUrl(img.src, true);
+      if (img.src !== newSrc) {
+        const skeleton = container.querySelector('.skeleton-loader');
+        if (skeleton) {
+          skeleton.style.display = '';
+        }
+        img.classList.remove('loaded');
+
+        const onImageDone = () => {
+          img.classList.add('loaded');
+          if (skeleton) skeleton.style.display = 'none';
+          // Fallback geometry check in case app wasn't tagged
+          if (img.naturalWidth === 128 && newType === '2x') {
+            container.classList.add('is-2x');
+            container.classList.remove('is-square');
+          } else if (img.naturalWidth > 0 && img.naturalWidth === img.naturalHeight && newType === 'square') {
+            container.classList.add('is-square');
+            container.classList.remove('is-2x');
+          }
+        };
+
+        img.onload = onImageDone;
+        img.onerror = onImageDone;
+        img.src = newSrc;
+        if (img.complete) {
+          onImageDone();
+        }
       }
-      img.classList.remove('loaded');
-
-      const onImageLoad = () => {
-        img.classList.add('loaded');
-        if (skeleton) skeleton.style.display = 'none';
-        const is2x = img.naturalWidth === 128;
-        const isSquare = img.naturalWidth > 0 && img.naturalWidth === img.naturalHeight;
-        container.classList.toggle('is-2x', is2x);
-        container.classList.toggle('is-square', isSquare);
-      };
-
-      img.addEventListener('load', onImageLoad, { once: true });
-      img.src = updateUrl(img.src);
     }
   });
 }
@@ -966,15 +991,48 @@ function setupLazyLoading() {
       if (entry.isIntersecting) {
         const img = entry.target;
         if (img.dataset.src) {
+          const container = img.closest('.app-img');
+          const appItem = img.closest('.app-item');
+          const previewSelect = document.getElementById('preview_type_top');
+          const currentPreviewType = previewSelect ? previewSelect.value : '2x';
+          const supports2x = appItem && appItem.dataset.supports2x === 'true';
+          const supportsSquare = appItem && appItem.dataset.supportsSquare === 'true';
+
+          if (container) {
+            if (currentPreviewType === '2x' && supports2x) {
+              container.classList.add('is-2x');
+              container.classList.remove('is-square');
+            } else if (currentPreviewType === 'square' && supportsSquare) {
+              container.classList.add('is-square');
+              container.classList.remove('is-2x');
+            } else {
+              container.classList.remove('is-2x');
+              container.classList.remove('is-square');
+            }
+          }
+
           img.src = img.dataset.src;
           img.removeAttribute('data-src');
-          // Add loaded class when image loads
-          img.onload = function () {
+
+          const skeleton = container ? container.querySelector('.skeleton-loader') : null;
+          const onImageDone = function () {
             img.classList.add('loaded');
+            if (skeleton) skeleton.style.display = 'none';
+            if (container) {
+              if (img.naturalWidth === 128 && currentPreviewType === '2x') {
+                container.classList.add('is-2x');
+                container.classList.remove('is-square');
+              } else if (img.naturalWidth > 0 && img.naturalWidth === img.naturalHeight && currentPreviewType === 'square') {
+                container.classList.add('is-square');
+                container.classList.remove('is-2x');
+              }
+            }
           };
-          // Also add loaded class immediately for cached images
+
+          img.onload = onImageDone;
+          img.onerror = onImageDone;
           if (img.complete) {
-            img.classList.add('loaded');
+            onImageDone();
           }
           observer.unobserve(img);
         }

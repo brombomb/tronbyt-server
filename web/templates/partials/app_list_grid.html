@@ -110,7 +110,9 @@
      data-published="{{ .App.Published }}"
      data-updated="{{ .App.Updated }}"
      data-installs="{{ with .App.InstallCount }}{{ . }}{{ end }}"
-     data-tags="{{ range $i, $tag := .App.Tags }}{{ if $i }},{{ end }}{{ $tag }}{{ end }}">
+     data-tags="{{ range $i, $tag := .App.Tags }}{{ if $i }},{{ end }}{{ $tag }}{{ end }}"
+     data-supports-2x="{{ if .App.Supports2x }}true{{ else }}false{{ end }}"
+     data-supports-square="{{ if .App.Supports64x64 }}true{{ else }}false{{ end }}">
 {{ if .App.IsInstalled }}
 <div class="installed-badge">{{ t .Localizer "Installed" }}</div>
 {{ end }}
