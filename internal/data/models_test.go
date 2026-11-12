@@ -198,6 +198,35 @@ func TestDeviceTypeCanvasAndDisplaySize(t *testing.T) {
 	}
 }
 
+func TestDeviceTypePreviewType(t *testing.T) {
+	tests := []struct {
+		deviceType DeviceType
+		wantSquare bool
+		wantType   string
+	}{
+		{DeviceTidbytGen1, false, "1x"},
+		{DeviceTidbytGen2, false, "1x"},
+		{DeviceRaspberryPi, false, "1x"},
+		{DeviceMatrixPortal, false, "1x"},
+		{DeviceTronbytS3, false, "1x"},
+		{DeviceWaveshareS3, false, "1x"},
+		{DeviceRaspberryPiWide, false, "2x"},
+		{DeviceTronbytS3Wide, false, "2x"},
+		{DeviceMatrixPortalWide, false, "2x"},
+		{DeviceWaveshareS3Wide, false, "2x"},
+		{DeviceRaspberryPiSquare, true, "square"},
+		{DeviceMatrixPortalSquare, true, "square"},
+		{DeviceUnknown, false, "2x"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.deviceType.String(), func(t *testing.T) {
+			assert.Equal(t, tt.wantSquare, tt.deviceType.IsSquare())
+			assert.Equal(t, tt.wantType, tt.deviceType.DefaultPreviewType())
+		})
+	}
+}
+
 // The square MatrixPortal is a firmware device, so it needs its own binaries
 // rather than silently inheriting the 64x32 ones: flashing those would light
 // the panel at the wrong geometry.

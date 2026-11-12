@@ -786,6 +786,27 @@ func (dt DeviceType) CanvasSize() (width, height int) {
 	}
 }
 
+// IsSquare returns whether this device type drives a 1:1 square canvas (e.g., 64x64).
+func (dt DeviceType) IsSquare() bool {
+	w, h := dt.CanvasSize()
+	return w > 0 && w == h
+}
+
+// DefaultPreviewType returns the default preview format ("1x", "square", or "2x")
+// for this device type.
+func (dt DeviceType) DefaultPreviewType() string {
+	switch {
+	case dt.IsSquare():
+		return "square"
+	case dt.Supports2x():
+		return "2x"
+	case dt == DeviceUnknown:
+		return "2x"
+	default:
+		return "1x"
+	}
+}
+
 // DisplaySize returns the physical panel dimensions of this device type, in
 // panel pixels: the canvas size with 2x scaling applied where the type uses it.
 func (dt DeviceType) DisplaySize() (width, height int) {

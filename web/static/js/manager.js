@@ -656,6 +656,72 @@ function filterByProvider() {
   applyFilters();
 }
 
+function changePreviewType(newType) {
+  // Sync all preview selectors on the page (top and filters)
+  document.querySelectorAll('.preview-type-select').forEach(sel => {
+    if (sel.value !== newType) {
+      sel.value = newType;
+    }
+  });
+
+  // Update browser URL query parameter without full reload
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set('preview', newType);
+    window.history.replaceState({}, '', url.toString());
+  } catch (e) {
+    console.error('Failed to update URL:', e);
+  }
+
+  // Update preview URL for each image
+  const updateUrl = (rawUrl) => {
+    try {
+      const u = new URL(rawUrl, window.location.origin);
+      u.searchParams.set('preview', newType);
+      if (newType === 'square') {
+        u.searchParams.set('square', '1');
+      } else {
+        u.searchParams.delete('square');
+      }
+      return u.pathname + u.search;
+    } catch (e) {
+      return rawUrl;
+    }
+  };
+
+  document.querySelectorAll('.app-item .app-img').forEach(container => {
+    const img = container.querySelector('img');
+    if (!img) return;
+
+    if (newType !== 'square') {
+      container.classList.remove('is-square');
+    }
+
+    if (img.dataset.src) {
+      img.dataset.src = updateUrl(img.dataset.src);
+    }
+    if (img.src) {
+      const skeleton = container.querySelector('.skeleton-loader');
+      if (skeleton) {
+        skeleton.style.display = '';
+      }
+      img.classList.remove('loaded');
+
+      const onImageLoad = () => {
+        img.classList.add('loaded');
+        if (skeleton) skeleton.style.display = 'none';
+        const is2x = img.naturalWidth === 128;
+        const isSquare = img.naturalWidth > 0 && img.naturalWidth === img.naturalHeight;
+        container.classList.toggle('is-2x', is2x);
+        container.classList.toggle('is-square', isSquare);
+      };
+
+      img.addEventListener('load', onImageLoad, { once: true });
+      img.src = updateUrl(img.src);
+    }
+  });
+}
+
 function sortApps(searchId) {
   sortType = document.getElementById('sort_' + searchId).value;
   try {

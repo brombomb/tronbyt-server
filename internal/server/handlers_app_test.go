@@ -1419,3 +1419,176 @@ func TestExternalAppThumbnail_SingleFlightDeduplication(t *testing.T) {
 		assert.NoError(t, err)
 	}
 }
+
+func TestHandleAppThumbnail_PreviewTypes(t *testing.T) {
+	s := newTestServer(t)
+
+	appDir := filepath.Join(s.DataDir, "apps", "clock")
+	require.NoError(t, os.MkdirAll(appDir, 0755))
+
+	p1x := []byte("preview-1x-content")
+	p2x := []byte("preview-2x-content")
+	pSquare := []byte("preview-square-content")
+
+	require.NoError(t, os.WriteFile(filepath.Join(appDir, "preview.webp"), p1x, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(appDir, "preview-2x.webp"), p2x, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(appDir, "preview-square.webp"), pSquare, 0644))
+
+	s.systemAppsCache = []apps.AppMetadata{
+		{
+			ID:            "clock",
+			Name:          "Clock",
+			Path:          "apps/clock",
+			Preview:       "clock/preview.webp",
+			Preview2x:     "clock/preview-2x.webp",
+			PreviewSquare: "clock/preview-square.webp",
+			Supports2x:    true,
+			Supports64x64: true,
+		},
+	}
+
+	tests := []struct {
+		name     string
+		url      string
+		expected []byte
+	}{
+		{"1x preview param", "/preview/app/clock?preview=1x", p1x},
+		{"2x preview param", "/preview/app/clock?preview=2x", p2x},
+		{"square preview param", "/preview/app/clock?preview=square", pSquare},
+		{"legacy square param", "/preview/app/clock?square=1", pSquare},
+		{"default preview without param", "/preview/app/clock", p2x},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodGet, tt.url, nil)
+			req.SetPathValue("id", "clock")
+			rr := httptest.NewRecorder()
+			s.handleAppThumbnail(rr, req)
+
+			assert.Equal(t, http.StatusOK, rr.Code)
+			assert.Equal(t, tt.expected, rr.Body.Bytes())
+		})
+	}
+}
+
+func TestExternalAppThumbnail_PreviewTypes(t *testing.T) {
+	s := newTestServer(t)
+
+	var lastReq providers.RenderRequest
+	mock := &mockExternalProvider{
+		name: "screeny",
+		apps: []providers.ExternalAppMeta{
+			{ID: "test_pattern", Name: "Test Pattern"},
+		},
+		renderFunc: func(ctx context.Context, req providers.RenderRequest) ([]providers.RenderChunk, error) {
+			lastReq = req
+			return []providers.RenderChunk{
+				{WebPBytes: dummyChunkWebP1, DurationMs: 1000},
+			}, nil
+		},
+	}
+	s.RegisterExternalProvider(mock)
+
+	tests := []struct {
+		name         string
+		url          string
+		expectedW    int
+		expectedH    int
+		cachePattern string
+	}{
+		{"1x preview", "/preview/app/screeny:test_pattern?preview=1x", 64, 32, "test_pattern.webp"},
+		{"2x preview", "/preview/app/screeny:test_pattern?preview=2x", 128, 64, "test_pattern@2x.webp"},
+		{"square preview", "/preview/app/screeny:test_pattern?preview=square", 64, 64, "test_pattern@square.webp"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodGet, tt.url, nil)
+			req.SetPathValue("id", "screeny:test_pattern")
+			rr := httptest.NewRecorder()
+			s.handleAppThumbnail(rr, req)
+
+			assert.Equal(t, http.StatusOK, rr.Code)
+			assert.Equal(t, tt.expectedW, lastReq.Width)
+			assert.Equal(t, tt.expectedH, lastReq.Height)
+
+			cachePath := filepath.Join(s.DataDir, "cache", "previews", "screeny", tt.cachePattern)
+			assert.FileExists(t, cachePath)
+		})
+	}
+}
+
+func TestHandleAddAppGet_PreviewTypeDefault(t *testing.T) {
+	s := newTestServer(t)
+
+	user := data.User{Username: "alice"}
+	require.NoError(t, s.DB.Create(&user).Error)
+
+	d1x := data.Device{
+		ID:       "dev1x",
+		Username: "alice",
+		Name:     "Tidbyt 1x",
+		Type:     data.DeviceTidbytGen1,
+		APIKey:   "key-1x",
+	}
+	require.NoError(t, s.DB.Create(&d1x).Error)
+
+	dSquare := data.Device{
+		ID:       "devSquare",
+		Username: "alice",
+		Name:     "Pi Square",
+		Type:     data.DeviceRaspberryPiSquare,
+		APIKey:   "key-square",
+	}
+	require.NoError(t, s.DB.Create(&dSquare).Error)
+
+	d2x := data.Device{
+		ID:       "dev2x",
+		Username: "alice",
+		Name:     "S3 Wide",
+		Type:     data.DeviceTronbytS3Wide,
+		APIKey:   "key-2x",
+	}
+	require.NoError(t, s.DB.Create(&d2x).Error)
+
+	// 1. 1x device defaults to 1x preview
+	req1x, _ := http.NewRequest(http.MethodGet, "/devices/dev1x/addapp", nil)
+	req1x.SetPathValue("id", "dev1x")
+	ctx1x := context.WithValue(req1x.Context(), userContextKey, &user)
+	ctx1x = context.WithValue(ctx1x, deviceContextKey, &d1x)
+	rr1x := httptest.NewRecorder()
+	s.handleAddAppGet(rr1x, req1x.WithContext(ctx1x))
+	assert.Equal(t, http.StatusOK, rr1x.Code)
+	assert.Contains(t, rr1x.Body.String(), `<option value="1x" selected>`)
+
+	// 2. Square device defaults to square preview
+	reqSq, _ := http.NewRequest(http.MethodGet, "/devices/devSquare/addapp", nil)
+	reqSq.SetPathValue("id", "devSquare")
+	ctxSq := context.WithValue(reqSq.Context(), userContextKey, &user)
+	ctxSq = context.WithValue(ctxSq, deviceContextKey, &dSquare)
+	rrSq := httptest.NewRecorder()
+	s.handleAddAppGet(rrSq, reqSq.WithContext(ctxSq))
+	assert.Equal(t, http.StatusOK, rrSq.Code)
+	assert.Contains(t, rrSq.Body.String(), `<option value="square" selected>`)
+
+	// 3. 2x device defaults to 2x preview
+	req2x, _ := http.NewRequest(http.MethodGet, "/devices/dev2x/addapp", nil)
+	req2x.SetPathValue("id", "dev2x")
+	ctx2x := context.WithValue(req2x.Context(), userContextKey, &user)
+	ctx2x = context.WithValue(ctx2x, deviceContextKey, &d2x)
+	rr2x := httptest.NewRecorder()
+	s.handleAddAppGet(rr2x, req2x.WithContext(ctx2x))
+	assert.Equal(t, http.StatusOK, rr2x.Code)
+	assert.Contains(t, rr2x.Body.String(), `<option value="2x" selected>`)
+
+	// 4. Override with query param ?preview=square on 1x device
+	reqOverride, _ := http.NewRequest(http.MethodGet, "/devices/dev1x/addapp?preview=square", nil)
+	reqOverride.SetPathValue("id", "dev1x")
+	ctxOverride := context.WithValue(reqOverride.Context(), userContextKey, &user)
+	ctxOverride = context.WithValue(ctxOverride, deviceContextKey, &d1x)
+	rrOverride := httptest.NewRecorder()
+	s.handleAddAppGet(rrOverride, reqOverride.WithContext(ctxOverride))
+	assert.Equal(t, http.StatusOK, rrOverride.Code)
+	assert.Contains(t, rrOverride.Body.String(), `<option value="square" selected>`)
+}

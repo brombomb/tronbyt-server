@@ -119,6 +119,14 @@ func (s *Server) handleAddAppGet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	previewType := "2x"
+	if device != nil && device.Type != data.DeviceUnknown {
+		previewType = device.Type.DefaultPreviewType()
+	}
+	if qp := r.URL.Query().Get("preview"); qp == "1x" || qp == "2x" || qp == "square" {
+		previewType = qp
+	}
+
 	s.renderTemplate(w, r, "addapp", TemplateData{
 		User:              user,
 		Device:            device,
@@ -128,6 +136,7 @@ func (s *Server) handleAddAppGet(w http.ResponseWriter, r *http.Request) {
 		SystemRepoInfo:    systemRepoInfo,
 		PublicAppsCatalog: apps.UsesPublicAppsCatalog(s.Config.SystemAppsRepo),
 		Config:            &config.TemplateConfig{Production: s.Config.Production},
+		PreviewType:       previewType,
 	})
 }
 
@@ -391,14 +400,45 @@ func (s *Server) handleAppThumbnail(w http.ResponseWriter, r *http.Request) {
 	// Pick the best preview from metadata.
 	// A square panel is a different shape, not a bigger one, so a square
 	// preview wins over the 2x preview when the caller asks for one.
+	previewReq := r.URL.Query().Get("preview")
+	if previewReq == "" && r.URL.Query().Get("square") == "1" {
+		previewReq = "square"
+	}
+
 	var file string
-	switch {
-	case r.URL.Query().Get("square") == "1" && appMeta.PreviewSquare != "":
-		file = appMeta.PreviewSquare
-	case appMeta.Supports2x && appMeta.Preview2x != "":
-		file = appMeta.Preview2x
+	switch previewReq {
+	case "1x":
+		if appMeta.Preview != "" {
+			file = appMeta.Preview
+		} else if appMeta.Supports2x && appMeta.Preview2x != "" {
+			file = appMeta.Preview2x
+		} else {
+			file = appMeta.PreviewSquare
+		}
+	case "square":
+		if appMeta.PreviewSquare != "" {
+			file = appMeta.PreviewSquare
+		} else if appMeta.Supports2x && appMeta.Preview2x != "" {
+			file = appMeta.Preview2x
+		} else {
+			file = appMeta.Preview
+		}
+	case "2x":
+		if appMeta.Supports2x && appMeta.Preview2x != "" {
+			file = appMeta.Preview2x
+		} else if appMeta.Preview != "" {
+			file = appMeta.Preview
+		} else {
+			file = appMeta.PreviewSquare
+		}
 	default:
-		file = appMeta.Preview
+		if appMeta.Supports2x && appMeta.Preview2x != "" {
+			file = appMeta.Preview2x
+		} else if appMeta.Preview != "" {
+			file = appMeta.Preview
+		} else {
+			file = appMeta.PreviewSquare
+		}
 	}
 
 	if file == "" {
@@ -454,8 +494,28 @@ func (s *Server) serveExternalAppThumbnail(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "Invalid app ID", http.StatusBadRequest)
 		return
 	}
+
+	previewReq := r.URL.Query().Get("preview")
+	if previewReq == "" && r.URL.Query().Get("square") == "1" {
+		previewReq = "square"
+	}
+
+	width := 64
+	height := 32
+	cacheSuffix := ""
+	switch previewReq {
+	case "square":
+		width = 64
+		height = 64
+		cacheSuffix = "@square"
+	case "2x":
+		width = 128
+		height = 64
+		cacheSuffix = "@2x"
+	}
+
 	cacheDir := s.ensureCleanPreviewCache(provider.Name())
-	cacheFile, err := securejoin.SecureJoin(cacheDir, safeAppID+".webp")
+	cacheFile, err := securejoin.SecureJoin(cacheDir, safeAppID+cacheSuffix+".webp")
 	if err != nil {
 		http.Error(w, "Invalid cache file path", http.StatusBadRequest)
 		return
@@ -472,7 +532,7 @@ func (s *Server) serveExternalAppThumbnail(w http.ResponseWriter, r *http.Reques
 	}
 
 	// 2. Render preview chunk on demand using singleflight to deduplicate concurrent requests
-	key := fmt.Sprintf("%s:%s", provider.Name(), safeAppID)
+	key := fmt.Sprintf("%s:%s%s", provider.Name(), safeAppID, cacheSuffix)
 	val, err, _ := s.thumbnailSingleFlight.Do(key, func() (any, error) {
 		// Re-check disk cache inside singleflight
 		if !forceRefresh {
@@ -486,8 +546,8 @@ func (s *Server) serveExternalAppThumbnail(w http.ResponseWriter, r *http.Reques
 
 		req := providers.RenderRequest{
 			AppID:        safeAppID,
-			Width:        64,
-			Height:       32,
+			Width:        width,
+			Height:       height,
 			FPS:          15,
 			DurationMs:   externalAppThumbnailDurationMs, // 3000ms = smooth 3.0s animation
 			MaxChunkSize: 524288,

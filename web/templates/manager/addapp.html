@@ -22,6 +22,18 @@
     <div class="addapp-actions">
         <a class="w3-button w3-purple"
            href="/devices/{{ .Device.ID }}/uploadapp"><i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i> {{ t .Localizer "Upload app" }}</a>
+        <label for="preview_type_top" class="control-label preview-control">
+            {{ t .Localizer "Preview:" }}
+            <span class="select-wrap">
+                <select id="preview_type_top"
+                        class="preview-type-select"
+                        onchange="changePreviewType(this.value)">
+                    <option value="2x" {{ if eq .PreviewType "2x" }}selected{{ end }}>{{ t .Localizer "2x (128×64)" }}</option>
+                    <option value="1x" {{ if eq .PreviewType "1x" }}selected{{ end }}>{{ t .Localizer "1x (64×32)" }}</option>
+                    <option value="square" {{ if eq .PreviewType "square" }}selected{{ end }}>{{ t .Localizer "Square (64×64)" }}</option>
+                </select>
+            </span>
+        </label>
     </div>
     <form method="post" id="main_form" class="addapp-config">
         <section class="settings-card">
@@ -38,6 +50,7 @@
             "IsCustom" true
             "DeviceID" .Device.ID
             "Localizer" .Localizer
+            "PreviewType" .PreviewType
             ) }}
             <hr>
             {{ end }}
@@ -55,6 +68,7 @@
             "SystemRepoInfo" .SystemRepoInfo
             "Providers" .Providers
             "PublicAppsCatalog" .PublicAppsCatalog
+            "PreviewType" .PreviewType
             ) }}
         </section>
         <input type="hidden" name="name" id="selected_app">

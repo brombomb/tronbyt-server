@@ -93,6 +93,7 @@ type TemplateData struct {
 	Providers         []string
 	DeviceTypeChoices []DeviceTypeGroup
 	Form              CreateDeviceFormData
+	PreviewType       string
 
 	// Repo Info for Admin/User Settings
 	SystemRepoInfo        *gitutils.RepoInfo

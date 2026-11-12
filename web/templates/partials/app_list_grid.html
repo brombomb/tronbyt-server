@@ -72,12 +72,25 @@
                 </select>
             </span>
         </label>
+        <label for="preview_type_{{ .SearchID }}"
+               class="control-label preview-control">
+            {{ t .Localizer "Preview:" }}
+            <span class="select-wrap">
+                <select id="preview_type_{{ .SearchID }}"
+                        class="preview-type-select"
+                        onchange="changePreviewType(this.value)">
+                    <option value="2x" {{ if eq .PreviewType "2x" }}selected{{ end }}>{{ t .Localizer "2x (128×64)" }}</option>
+                    <option value="1x" {{ if eq .PreviewType "1x" }}selected{{ end }}>{{ t .Localizer "1x (64×32)" }}</option>
+                    <option value="square" {{ if eq .PreviewType "square" }}selected{{ end }}>{{ t .Localizer "Square (64×64)" }}</option>
+                </select>
+            </span>
+        </label>
     </div>
 </div>
 {{ end }}
 <div id="{{ .GridID }}" class="app-grid">
     {{ range .Apps }}
-    {{ template "app_card_grid_item" (dict "App" . "DeviceID" $.DeviceID "Localizer" $.Localizer "IsCustom" $.IsCustom "PublicAppsCatalog" $.PublicAppsCatalog) }}
+    {{ template "app_card_grid_item" (dict "App" . "DeviceID" $.DeviceID "Localizer" $.Localizer "IsCustom" $.IsCustom "PublicAppsCatalog" $.PublicAppsCatalog "PreviewType" $.PreviewType) }}
     {{ end }}
 </div>
 </div>
@@ -121,9 +134,9 @@
 <div class="supports-64x64-badge">64×64</div>
 {{ end }}
 <!-- Skeleton loader for images -->
-<div class="app-img">
+<div class="app-img{{ if and (eq .PreviewType "square") .App.Supports64x64 }} is-square{{ else if and (eq .PreviewType "2x") .App.Supports2x }} is-2x{{ end }}">
     <div class="skeleton-loader"></div>
-    <img data-src="/preview/app/{{ .App.ID }}?v=4"
+    <img data-src="/preview/app/{{ .App.ID }}?preview={{ or .PreviewType "2x" }}{{ if eq .PreviewType "square" }}&square=1{{ end }}&v=4"
          alt="{{ .App.Name }}"
          class="lazy-image"
          width="64"
